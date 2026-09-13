@@ -9,6 +9,7 @@ import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.util.Mth;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.List;
@@ -47,6 +48,12 @@ public final class BotController {
 	private volatile String navState = "idle";
 	private boolean drivingKeys;
 
+	// smooth look: interpolate toward a target each tick instead of snapping
+	private static final float LOOK_STEP_DEG = 20.0F;
+	private Float lookTargetYaw;
+	private Float lookTargetPitch;
+	private int swingTimer;
+
 	// --- public control surface (called from handlers, on the render thread) ----------------
 
 	public synchronized void setMovement(Boolean f, Boolean b, Boolean l, Boolean r, Boolean jump, Boolean sn, Boolean sp) {
@@ -66,6 +73,17 @@ public final class BotController {
 
 	public synchronized void jumpOnce() {
 		jumpOnceTicks = Math.max(jumpOnceTicks, 2);
+	}
+
+	/** Aim at a yaw/pitch; the controller interpolates toward it each tick (like turning a mouse). */
+	public synchronized void lookAtTarget(float yaw, float pitch) {
+		this.lookTargetYaw = yaw;
+		this.lookTargetPitch = Mth.clamp(pitch, -90.0F, 90.0F);
+	}
+
+	public synchronized void clearLookTarget() {
+		this.lookTargetYaw = null;
+		this.lookTargetPitch = null;
 	}
 
 	public synchronized void startMining(BlockPos pos, Direction face) {
@@ -130,6 +148,7 @@ public final class BotController {
 			if (path != null) {
 				steer(mc, p);
 			}
+			tickLook(p);
 			boolean driving = fwd || back || left || right || jumpHeld || sneak || sprint || jumpOnceTicks > 0 || path != null;
 			if (driving) {
 				applyKeys(mc.options);
@@ -179,6 +198,31 @@ public final class BotController {
 			return;
 		}
 		gm.continueDestroyBlock(miningPos, miningFace);
+		// Keep the arm swinging while digging, the way a real player's does.
+		if (++swingTimer % 4 == 0) mc.player.swing(InteractionHand.MAIN_HAND);
+	}
+
+	private void tickLook(LocalPlayer p) {
+		Float ty = lookTargetYaw;
+		if (ty == null) return;
+		float targetPitch = lookTargetPitch == null ? p.getXRot() : lookTargetPitch;
+		float dYaw = Mth.wrapDegrees(ty - p.getYRot());
+		float dPitch = targetPitch - p.getXRot();
+		if (Math.abs(dYaw) <= LOOK_STEP_DEG && Math.abs(dPitch) <= LOOK_STEP_DEG) {
+			applyLook(p, ty, targetPitch);
+			lookTargetYaw = null;
+			lookTargetPitch = null;
+			return;
+		}
+		applyLook(p, p.getYRot() + Mth.clamp(dYaw, -LOOK_STEP_DEG, LOOK_STEP_DEG),
+				p.getXRot() + Mth.clamp(dPitch, -LOOK_STEP_DEG, LOOK_STEP_DEG));
+	}
+
+	private static void applyLook(LocalPlayer p, float yaw, float pitch) {
+		p.setYRot(yaw);
+		p.setXRot(Mth.clamp(pitch, -90.0F, 90.0F));
+		p.setYHeadRot(yaw);
+		p.setYBodyRot(yaw);
 	}
 
 	private void steer(Minecraft mc, LocalPlayer p) {
@@ -203,9 +247,7 @@ public final class BotController {
 		double horiz = Math.sqrt(dx * dx + dz * dz);
 
 		float yaw = (float) (Mth.atan2(dz, dx) * (180.0 / Math.PI)) - 90.0F;
-		p.setYRot(yaw);
-		p.setYHeadRot(yaw);
-		p.setYBodyRot(yaw);
+		lookAtTarget(yaw, 0.0F);
 
 		fwd = true;
 		back = left = right = false;

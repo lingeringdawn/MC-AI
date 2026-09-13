@@ -50,7 +50,7 @@ public final class ControlHandlers {
 			if (ctx.has("deltaYaw")) yaw += (float) ctx.getDouble("deltaYaw");
 			if (ctx.has("deltaPitch")) pitch += (float) ctx.getDouble("deltaPitch");
 			pitch = Mth.clamp(pitch, -90.0F, 90.0F);
-			applyLook(p, yaw, pitch);
+			aim(p, yaw, pitch, ctx.optBool("instant", false));
 			return look(p);
 		}));
 
@@ -62,7 +62,7 @@ public final class ControlHandlers {
 			double horiz = Math.sqrt(dx * dx + dz * dz);
 			float yaw = (float) (Mth.atan2(dz, dx) * (180.0 / Math.PI)) - 90.0F;
 			float pitch = (float) (-(Mth.atan2(dy, horiz) * (180.0 / Math.PI)));
-			applyLook(p, yaw, Mth.clamp(pitch, -90.0F, 90.0F));
+			aim(p, yaw, Mth.clamp(pitch, -90.0F, 90.0F), ctx.optBool("instant", false));
 			return look(p);
 		}));
 
@@ -76,6 +76,16 @@ public final class ControlHandlers {
 			ClientMc.player().stopUsingItem();
 			return Json.ok("stopped using");
 		}));
+	}
+
+	/** Smooth by default (the controller interpolates over ticks); {@code instant} snaps the view. */
+	private static void aim(LocalPlayer p, float yaw, float pitch, boolean instant) {
+		if (instant) {
+			BotController.get().clearLookTarget();
+			applyLook(p, yaw, pitch);
+		} else {
+			BotController.get().lookAtTarget(yaw, pitch);
+		}
 	}
 
 	private static void applyLook(LocalPlayer p, float yaw, float pitch) {

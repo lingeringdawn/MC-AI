@@ -414,20 +414,25 @@ export const TOOLS: ToolDef[] = [
     method: "control.look",
     title: "Set/adjust look angles",
     description:
-      "Client-only. Set absolute yaw/pitch, or apply relative deltas. Yaw: 0=south,-90=east,90=west,180=north. Pitch: -90=up, 90=down.",
+      "Client-only. Set absolute yaw/pitch, or apply relative deltas. Yaw: 0=south,-90=east,90=west,180=north. Pitch: -90=up, 90=down. The turn is SMOOTH by default (interpolated over ticks like moving a mouse); pass instant:true to snap.",
     inputSchema: {
       yaw: z.number().optional().describe("Absolute yaw in degrees."),
       pitch: z.number().optional().describe("Absolute pitch in degrees (-90..90)."),
       deltaYaw: z.number().optional().describe("Relative yaw change in degrees."),
       deltaPitch: z.number().optional().describe("Relative pitch change in degrees."),
+      instant: z.boolean().optional().default(false).describe("Snap instantly instead of turning smoothly."),
     },
   },
   {
     name: "look_at",
     method: "control.lookAt",
     title: "Look at a point",
-    description: "Client-only. Rotate the player to face a world coordinate.",
-    inputSchema: { ...vec3() },
+    description:
+      "Client-only. Turn the player to face a world coordinate. Smooth by default (interpolated over ticks); pass instant:true to snap.",
+    inputSchema: {
+      ...vec3(),
+      instant: z.boolean().optional().default(false).describe("Snap instantly instead of turning smoothly."),
+    },
   },
   {
     name: "jump",
@@ -632,6 +637,32 @@ export const TOOLS: ToolDef[] = [
       max: z.number().int().min(1).max(512).optional().default(64).describe("Maximum number of blocks to mine."),
       timeoutSeconds: z.number().int().min(1).max(300).optional().default(60),
     },
+    annotations: WRITE,
+  },
+
+  // ===== ui (client, menus) ==================================================================
+  {
+    name: "menu_status",
+    method: "ui.state",
+    title: "Current screen / menu",
+    description: "Client-only. Report which GUI screen is open ('none' = normal gameplay) and which container menu is active.",
+    inputSchema: {},
+    annotations: READ,
+  },
+  {
+    name: "open_inventory",
+    method: "ui.openInventory",
+    title: "Open the player inventory",
+    description: "Client-only. Open the player inventory / 2x2 crafting screen (like pressing E).",
+    inputSchema: {},
+    annotations: WRITE,
+  },
+  {
+    name: "close_screen",
+    method: "ui.close",
+    title: "Close the current screen",
+    description: "Client-only. Close any open screen/container (like pressing Esc or backing out of a chest).",
+    inputSchema: {},
     annotations: WRITE,
   },
 

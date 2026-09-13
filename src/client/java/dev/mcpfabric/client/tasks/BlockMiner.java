@@ -33,6 +33,7 @@ final class BlockMiner {
 	private final BlockPos pos;
 	private boolean navStarted;
 	private boolean miningStarted;
+	private boolean approached;
 	private String tool = "hand";
 
 	BlockMiner(BlockPos pos) {
@@ -66,9 +67,11 @@ final class BlockMiner {
 			BotController.get().stopNavigation("done");
 			return State.DONE;
 		}
-		if (!inReach(p)) {
+		// Need to be in reach AND actually able to see the block (no digging through walls).
+		if (!inReach(p) || !hasLineOfSight(p, level)) {
 			if (isNavigating()) return State.WORKING;
-			navStarted = false;
+			if (approached) return State.UNREACHABLE; // already tried to get closer, still blocked
+			approached = true;
 			if (!approach(mc, p, level)) return State.UNREACHABLE;
 			return State.WORKING;
 		}
@@ -123,10 +126,25 @@ final class BlockMiner {
 		double horiz = Math.sqrt(dx * dx + dz * dz);
 		float yaw = (float) (Math.atan2(dz, dx) * (180.0 / Math.PI)) - 90.0F;
 		float pitch = (float) (-(Math.atan2(dy, horiz) * (180.0 / Math.PI)));
-		p.setYRot(yaw);
-		p.setXRot(pitch);
-		p.setYHeadRot(yaw);
-		p.setYBodyRot(yaw);
+		BotController.get().lookAtTarget(yaw, pitch); // smooth turn, not a snap
+	}
+
+	/** True when nothing solid sits between the eye and the block (so we are not mining through walls). */
+	private boolean hasLineOfSight(LocalPlayer p, ClientLevel level) {
+		Vec3 from = p.getEyePosition();
+		Vec3 to = Vec3.atCenterOf(pos);
+		Vec3 delta = to.subtract(from);
+		double len = delta.length();
+		if (len < 1.0e-4) return true;
+		Vec3 dir = delta.scale(1.0 / len);
+		BlockPos.MutableBlockPos m = new BlockPos.MutableBlockPos();
+		for (double t = 0.35; t < len - 0.05; t += 0.15) {
+			Vec3 pt = from.add(dir.scale(t));
+			m.set(Mth.floor(pt.x), Mth.floor(pt.y), Mth.floor(pt.z));
+			if (m.equals(pos)) continue;
+			if (!level.getBlockState(m).getCollisionShape(level, m).isEmpty()) return false;
+		}
+		return true;
 	}
 
 	/** Pick the hotbar item with the highest destroy speed for this block. */
