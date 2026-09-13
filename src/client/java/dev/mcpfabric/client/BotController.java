@@ -57,8 +57,27 @@ public final class BotController {
 
 	// smooth look (mouse-delta style): interpolate toward a yaw/pitch target each tick
 	private static final float LOOK_STEP_DEG = 20.0F;
+
+	/**
+	 * Look-priority levels. Several subsystems want to point the camera at once (navigation wants the
+	 * next path node, a task wants the block or entity it is working on, an explicit control call
+	 * wants whatever the caller asked for). Without arbitration they overwrite each other every tick
+	 * and the view whips back and forth between two directions. A request only replaces the current
+	 * one if it is at least as important, or if the current one has gone stale.
+	 */
+	public static final int LOOK_NAV = 1;
+	public static final int LOOK_TASK = 2;
+	public static final int LOOK_USER = 3;
+	/** How long the current look owner keeps the view after its last refresh. */
+	private static final long LOOK_HOLD_TICKS = 3;
+
 	private Float lookTargetYaw;
 	private Float lookTargetPitch;
+	private int lookPriority = Integer.MIN_VALUE;
+	/** Tick of the last refresh; small sentinel so tick arithmetic can never overflow. */
+	private long lookRefreshedTick = -1000L;
+	/** Game-tick counter used for the look latch and staleness checks. */
+	private long currentTick;
 	/** Rotation the controller last applied — compared with the live rotation to spot real mouse input. */
 	private float lastAppliedYaw = Float.NaN;
 	private float lastAppliedPitch = Float.NaN;
@@ -109,15 +128,33 @@ public final class BotController {
 		lastAppliedPitch = p.getXRot();
 	}
 
-	/** Aim at a yaw/pitch; the controller interpolates toward it each tick, like moving a mouse. */
-	public synchronized void lookAtTarget(float yaw, float pitch) {
+	/**
+	 * Aim at a yaw/pitch; the controller interpolates toward it each tick, like moving a mouse.
+	 *
+	 * @param priority who is asking ({@link #LOOK_NAV}, {@link #LOOK_TASK}, {@link #LOOK_USER}); a
+	 *                 lower-priority request cannot steal the view from a higher-priority one that
+	 *                 refreshed within {@link #LOOK_HOLD_TICKS}, which is what stops navigation and a
+	 *                 task from fighting over the camera every tick.
+	 */
+	public synchronized void lookAtTarget(float yaw, float pitch, int priority) {
+		boolean held = (currentTick - lookRefreshedTick) < LOOK_HOLD_TICKS;
+		if (held && priority < lookPriority) return; // someone more important owns the view right now
 		this.lookTargetYaw = yaw;
 		this.lookTargetPitch = Mth.clamp(pitch, -90.0F, 90.0F);
+		this.lookPriority = priority;
+		this.lookRefreshedTick = currentTick;
+	}
+
+	/** Convenience for callers that are happy with the task-level priority. */
+	public synchronized void lookAtTarget(float yaw, float pitch) {
+		lookAtTarget(yaw, pitch, LOOK_TASK);
 	}
 
 	public synchronized void clearLookTarget() {
 		this.lookTargetYaw = null;
 		this.lookTargetPitch = null;
+		this.lookPriority = Integer.MIN_VALUE;
+		this.lookRefreshedTick = -1000L;
 	}
 
 	/** Degrees left to turn toward the current target (0 when settled or idle). */
@@ -127,6 +164,20 @@ public final class BotController {
 		float dy = Math.abs(Mth.wrapDegrees(lookTargetYaw - p.getYRot()));
 		float dp = Math.abs((lookTargetPitch == null ? p.getXRot() : lookTargetPitch) - p.getXRot());
 		return Math.max(dy, dp);
+	}
+
+	/**
+	 * True when the crosshair is already on the pending target. Callers that mine or attack use this
+	 * instead of polling {@link #lookErrorDeg()} for a slightly-less-than-exact angle, so they stop
+	 * nudging the camera the instant it is good enough.
+	 */
+	public synchronized boolean isLookSettled() {
+		LocalPlayer p = Minecraft.getInstance().player;
+		if (p == null || lookTargetYaw == null) return true;
+		float dy = Math.abs(Mth.wrapDegrees(lookTargetYaw - p.getYRot()));
+		float targetPitch = lookTargetPitch == null ? p.getXRot() : lookTargetPitch;
+		float dp = Math.abs(targetPitch - p.getXRot());
+		return dy <= 1.5F && dp <= 1.5F;
 	}
 
 	public synchronized boolean hasAppliedLook() {
@@ -207,6 +258,13 @@ public final class BotController {
 		}
 
 		synchronized (this) {
+			currentTick++;
+			// Drop a look target nothing refreshed any more (its owner stopped caring), so the next
+			// subsystem to ask is not blocked by a stale latch.
+			if (lookTargetYaw != null && (currentTick - lookRefreshedTick) > LOOK_HOLD_TICKS) {
+				lookTargetYaw = null;
+				lookTargetPitch = null;
+			}
 			// A real player has the controls: drop everything and let them drive.
 			if (HumanControl.suspended()) {
 				stopAllMovement();
@@ -224,6 +282,8 @@ public final class BotController {
 				steer(mc, p);
 			}
 			applyWaterSafety(p);
+			// Look is applied last: navigation and the active task have both had their say this tick,
+			// so the winner of the priority arbitration is what actually moves the camera.
 			tickLook(p);
 			boolean driving = fwd || back || left || right || jumpHeld || sneak || sprint
 					|| jumpOnceTicks > 0 || attackHeld || useHeld || path != null;
@@ -271,12 +331,14 @@ public final class BotController {
 		float targetPitch = lookTargetPitch == null ? p.getXRot() : lookTargetPitch;
 		float dYaw = Mth.wrapDegrees(ty - p.getYRot());
 		float dPitch = targetPitch - p.getXRot();
+		// Within one tick's step: snap the rest of the way, so the camera lands exactly on target
+		// instead of stepping past it and having to come back (the classic oscillation).
 		if (Math.abs(dYaw) <= LOOK_STEP_DEG && Math.abs(dPitch) <= LOOK_STEP_DEG) {
 			applyLook(p, ty, targetPitch);
-			lookTargetYaw = null;
-			lookTargetPitch = null;
 			return;
 		}
+		// A big turn is stepped toward the target; deliberately do not clear the target here, because
+		// the owner (navigation / the active task) refreshes it every tick anyway.
 		applyLook(p, p.getYRot() + Mth.clamp(dYaw, -LOOK_STEP_DEG, LOOK_STEP_DEG),
 				p.getXRot() + Mth.clamp(dPitch, -LOOK_STEP_DEG, LOOK_STEP_DEG));
 	}
@@ -309,12 +371,23 @@ public final class BotController {
 		}
 
 		BlockPos node = path.get(pathIndex);
-		double dx = node.getX() + 0.5 - p.getX();
-		double dz = node.getZ() + 0.5 - p.getZ();
-		double horiz = Math.sqrt(dx * dx + dz * dz);
 
-		float yaw = (float) (Mth.atan2(dz, dx) * (180.0 / Math.PI)) - 90.0F;
-		lookAtTarget(yaw, 0.0F);
+		// Aim at the next node we have not reached yet. Aiming straight at the node currently under our
+		// feet gives a near-zero direction vector, whose yaw flips wildly tick to tick — that is one of
+		// the ways the camera ended up whipping around. Look one node ahead whenever the immediate node
+		// is already underfoot, and fall back to the nav target if the node still gives no direction.
+		BlockPos aimNode = node;
+		if (horizOf(p, node) < 0.7 && pathIndex + 1 < path.size()) {
+			aimNode = path.get(pathIndex + 1);
+		}
+		double dx = aimNode.getX() + 0.5 - p.getX();
+		double dz = aimNode.getZ() + 0.5 - p.getZ();
+		double horiz = Math.sqrt(dx * dx + dz * dz);
+		if (horiz < 0.05) {
+			dx = navTarget.getX() + 0.5 - p.getX();
+			dz = navTarget.getZ() + 0.5 - p.getZ();
+			horiz = Math.sqrt(dx * dx + dz * dz);
+		}
 
 		boolean inWater = p.isInWater();
 
@@ -323,13 +396,18 @@ public final class BotController {
 		sprint = navSprint || inWater || p.position().distanceTo(Vec3.atBottomCenterOf(navTarget)) > 4.0;
 		if (sneak) sprint = false;
 
-		if (inWater) {
-			// Look along the path including up/down, so swimming can descend to a submerged node.
-			double dyNode = (node.getY() + 0.5) - p.getEyeY();
-			float pitch = (float) (-(Mth.atan2(dyNode, Math.max(horiz, 0.01)) * (180.0 / Math.PI)));
-			lookAtTarget(yaw, Mth.clamp(pitch, -70.0F, 45.0F));
-		} else {
-			lookAtTarget(yaw, 0.0F);
+		if (horiz >= 0.05) {
+			float yaw = (float) (Mth.atan2(dz, dx) * (180.0 / Math.PI)) - 90.0F;
+			if (inWater) {
+				// Look along the path including up/down, so swimming can descend to a submerged node.
+				double dyNode = (aimNode.getY() + 0.5) - p.getEyeY();
+				float pitch = (float) (-(Mth.atan2(dyNode, Math.max(horiz, 0.01)) * (180.0 / Math.PI)));
+				lookAtTarget(yaw, Mth.clamp(pitch, -70.0F, 45.0F), LOOK_NAV);
+			} else {
+				// Only flatten the pitch for level walking; on a multi-level path keep some of the
+				// vertical info so the camera does not snap between headings at a step.
+				lookAtTarget(yaw, 0.0F, LOOK_NAV);
+			}
 		}
 
 		fwd = true;
@@ -366,6 +444,13 @@ public final class BotController {
 				stopNavigationInternal("stuck");
 			}
 		}
+	}
+
+	/** Horizontal distance from the player to a block's centre. */
+	private static double horizOf(LocalPlayer p, BlockPos node) {
+		double dx = node.getX() + 0.5 - p.getX();
+		double dz = node.getZ() + 0.5 - p.getZ();
+		return Math.sqrt(dx * dx + dz * dz);
 	}
 
 	/** Re-plan from the player's current position to the same target (returns true if a path was found). */

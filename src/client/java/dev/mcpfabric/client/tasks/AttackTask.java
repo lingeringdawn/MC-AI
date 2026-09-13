@@ -25,11 +25,14 @@ import java.util.UUID;
 public final class AttackTask extends ClientTask {
 	private static final int NODE_BUDGET = 12000;
 	private static final double ATTACK_REACH = 3.0;
+	/** Give up after this many failed attempts to close the distance to a moving target. */
+	private static final int MAX_APPROACHES = 4;
 
 	private final UUID target;
 	private final int maxSwings;
 	private int swings;
-	private boolean approached;
+	/** Approach attempts so a target we can never close in on ends instead of looping forever. */
+	private int approaches;
 	private boolean seen;
 	private boolean wasCharged;
 
@@ -69,14 +72,19 @@ public final class AttackTask extends ClientTask {
 			return;
 		}
 
-		if (p.distanceTo(e) > ATTACK_REACH) {
+		// Hysteresis on the approach: start closing in only past APPROACH_AT, but once in reach keep
+		// fighting until the entity drifts beyond ATTACK_REACH + margin. Without the gap, standing
+		// right at the reach boundary made navigation start and stop on alternating ticks, which made
+		// the camera flip between the path heading and the entity every frame.
+		double dist = p.distanceTo(e);
+		boolean tooFar = isNavigating() ? dist > ATTACK_REACH + 0.6 : dist > ATTACK_REACH;
+		if (tooFar) {
 			BotController.get().setAttackHeld(false);
 			if (isNavigating()) return;
-			if (approached) {
+			if (approaches >= MAX_APPROACHES) {
 				failed("unreachable");
 				return;
 			}
-			approached = true;
 			BlockPos goal = e.blockPosition();
 			List<BlockPos> path = new AStarPathfinder(level, NODE_BUDGET)
 					.findPath(p.blockPosition(), goal, ATTACK_REACH - 0.5);
@@ -84,6 +92,7 @@ public final class AttackTask extends ClientTask {
 				failed("unreachable");
 				return;
 			}
+			approaches++;
 			BotController.get().startNavigation(path, goal, ATTACK_REACH - 0.5, true,
 					System.currentTimeMillis() + Math.max(1000L, remainingMs()));
 			return;
@@ -91,7 +100,8 @@ public final class AttackTask extends ClientTask {
 
 		if (isNavigating()) BotController.get().stopNavigation("in_reach");
 		aim(p, e);
-		boolean ready = BotController.get().lookErrorDeg() <= 6.0F && clearShot(mc, p, e);
+		boolean ready = (BotController.get().isLookSettled() || BotController.get().lookErrorDeg() <= 6.0F)
+				&& clearShot(mc, p, e);
 		BotController.get().setAttackHeld(ready);
 		if (ready) {
 			// Count charged swings the vanilla pipeline performs while the button is held.
@@ -107,6 +117,7 @@ public final class AttackTask extends ClientTask {
 		o.addProperty("target", target.toString());
 		o.addProperty("swings", swings);
 		o.addProperty("maxSwings", maxSwings);
+		o.addProperty("approaches", approaches);
 		Entity e = Minecraft.getInstance().level != null ? find(Minecraft.getInstance().level, target) : null;
 		LocalPlayer p = Minecraft.getInstance().player;
 		if (e != null) {
@@ -164,7 +175,8 @@ public final class AttackTask extends ClientTask {
 		double horiz = Math.sqrt(dx * dx + dz * dz);
 		float yaw = (float) (Math.atan2(dz, dx) * (180.0 / Math.PI)) - 90.0F;
 		float pitch = (float) (-(Math.atan2(dy, horiz) * (180.0 / Math.PI)));
-		BotController.get().lookAtTarget(yaw, pitch);
+		// Task priority so the entity we are fighting wins the camera over the approach heading.
+		BotController.get().lookAtTarget(yaw, pitch, BotController.LOOK_TASK);
 	}
 
 	private static boolean isNavigating() {

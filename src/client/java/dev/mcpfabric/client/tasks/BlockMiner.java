@@ -65,7 +65,10 @@ final class BlockMiner {
 		}
 
 		aim(mc, p);
-		if (BotController.get().lookErrorDeg() > 3.0F) {
+		// Only dig once the crosshair is actually settled on the block. A tight per-tick tolerance
+		// makes the controller keep re-aiming and never press, so wait for the interpolated turn to
+		// arrive (isLookSettled) instead of re-issuing the aim forever.
+		if (!BotController.get().isLookSettled() && BotController.get().lookErrorDeg() > 3.0F) {
 			BotController.get().setAttackHeld(false);
 			return State.WORKING;
 		}
@@ -170,7 +173,9 @@ final class BlockMiner {
 		double horiz = Math.sqrt(dx * dx + dz * dz);
 		float yaw = (float) (Math.atan2(dz, dx) * (180.0 / Math.PI)) - 90.0F;
 		float pitch = (float) (-(Math.atan2(dy, horiz) * (180.0 / Math.PI)));
-		BotController.get().lookAtTarget(yaw, pitch);
+		// Task priority: aiming at the block we are digging outranks the walking direction, so the two
+		// do not alternate control of the camera every tick.
+		BotController.get().lookAtTarget(yaw, pitch, BotController.LOOK_TASK);
 	}
 
 	private static Vec3 aimPoint(Minecraft mc, BlockPos at) {

@@ -149,7 +149,9 @@ public final class ControlHandlers {
 			BotController.get().clearLookTarget();
 			applyLook(p, yaw, pitch);
 		} else {
-			BotController.get().lookAtTarget(yaw, pitch);
+			// An explicit call outranks navigation and task aiming, so a caller who says "look here"
+			// is not overruled by whatever the bot happens to be walking towards.
+			BotController.get().lookAtTarget(yaw, pitch, BotController.LOOK_USER);
 		}
 	}
 
