@@ -7,6 +7,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.phys.Vec3;
 
 import java.util.List;
 
@@ -71,6 +72,25 @@ public final class MoveToTask extends ClientTask {
 			BotController.get().stopNavigation("task_timeout");
 			failed("timeout");
 		}
+	}
+
+	@Override
+	public JsonObject progress() {
+		JsonObject o = new JsonObject();
+		JsonObject g = new JsonObject();
+		g.addProperty("x", goal.getX());
+		g.addProperty("y", goal.getY());
+		g.addProperty("z", goal.getZ());
+		o.add("goal", g);
+		o.addProperty("reachRadius", reachRadius);
+		LocalPlayer p = Minecraft.getInstance().player;
+		if (p != null) o.addProperty("distance", p.position().distanceTo(Vec3.atBottomCenterOf(goal)));
+		return o;
+	}
+
+	@Override
+	public String describe() {
+		return "walk to " + goal.getX() + "," + goal.getY() + "," + goal.getZ();
 	}
 
 	@Override

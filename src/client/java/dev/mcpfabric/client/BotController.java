@@ -4,20 +4,19 @@ import com.google.gson.JsonObject;
 import dev.mcpfabric.client.nav.AStarPathfinder;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Options;
-import net.minecraft.client.multiplayer.MultiPlayerGameMode;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
 import net.minecraft.util.Mth;
-import net.minecraft.world.InteractionHand;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.List;
 
 /**
- * Per-tick driver for the local player: holds desired movement input (applied through key
- * mappings so it integrates with the vanilla input pipeline), single-shot jumps, survival mining,
- * and navigation following. The single instance ticks from {@code ClientTickEvents.END_CLIENT_TICK}.
+ * Per-tick driver for the local player. Every action is expressed as ordinary device input —
+ * movement keys, jump, and a held left mouse button — and applied through the vanilla key mappings,
+ * so the game's own input pipeline decides what actually happens (you dig/attack whatever the
+ * crosshair is on). Nothing here calls game-mode methods directly, and turning is interpolated like
+ * mouse movement instead of snapping.
  */
 public final class BotController {
 	private static final BotController INSTANCE = new BotController();
@@ -31,10 +30,10 @@ public final class BotController {
 	// desired movement
 	private volatile boolean fwd, back, left, right, jumpHeld, sneak, sprint;
 	private int jumpOnceTicks = 0;
-
-	// survival mining
-	private BlockPos miningPos;
-	private Direction miningFace = Direction.UP;
+	/** Held left mouse button: attack / mine whatever the crosshair points at. */
+	private volatile boolean attackHeld;
+	/** Held right mouse button: use / eat / place with the crosshair context. */
+	private volatile boolean useHeld;
 
 	// navigation
 	private List<BlockPos> path;
@@ -48,11 +47,21 @@ public final class BotController {
 	private volatile String navState = "idle";
 	private boolean drivingKeys;
 
-	// smooth look: interpolate toward a target each tick instead of snapping
+	// water safety: swim up for air instead of drowning
+	/** Air left when the bot abandons what it is doing and heads for the surface. */
+	private static final int AIR_SURFACE_AT = 180;
+	/** Air that counts as "breathing again"; below this we keep the head above the water. */
+	private static final int AIR_CLEAR_AT = 285;
+	private boolean surfacing;
+	private boolean surfaceJumpHeld;
+
+	// smooth look (mouse-delta style): interpolate toward a yaw/pitch target each tick
 	private static final float LOOK_STEP_DEG = 20.0F;
 	private Float lookTargetYaw;
 	private Float lookTargetPitch;
-	private int swingTimer;
+	/** Rotation the controller last applied — compared with the live rotation to spot real mouse input. */
+	private float lastAppliedYaw = Float.NaN;
+	private float lastAppliedPitch = Float.NaN;
 
 	// --- public control surface (called from handlers, on the render thread) ----------------
 
@@ -75,7 +84,32 @@ public final class BotController {
 		jumpOnceTicks = Math.max(jumpOnceTicks, 2);
 	}
 
-	/** Aim at a yaw/pitch; the controller interpolates toward it each tick (like turning a mouse). */
+	/** Hold or release the left mouse button (vanilla then mines/attacks the crosshair target). */
+	public synchronized void setAttackHeld(boolean held) {
+		attackHeld = held;
+	}
+
+	public synchronized boolean isAttackHeld() {
+		return attackHeld;
+	}
+
+	/** Hold or release the right mouse button (vanilla then uses/eats/places at the crosshair). */
+	public synchronized void setUseHeld(boolean held) {
+		useHeld = held;
+	}
+
+	public synchronized boolean isUseHeld() {
+		return useHeld;
+	}
+
+	/** Seed the expected rotation so real mouse movement can be detected before the bot ever turns. */
+	public synchronized void seedLook(LocalPlayer p) {
+		if (!Float.isNaN(lastAppliedYaw)) return;
+		lastAppliedYaw = p.getYRot();
+		lastAppliedPitch = p.getXRot();
+	}
+
+	/** Aim at a yaw/pitch; the controller interpolates toward it each tick, like moving a mouse. */
 	public synchronized void lookAtTarget(float yaw, float pitch) {
 		this.lookTargetYaw = yaw;
 		this.lookTargetPitch = Mth.clamp(pitch, -90.0F, 90.0F);
@@ -86,14 +120,42 @@ public final class BotController {
 		this.lookTargetPitch = null;
 	}
 
-	public synchronized void startMining(BlockPos pos, Direction face) {
-		this.miningPos = pos;
-		this.miningFace = face;
+	/** Degrees left to turn toward the current target (0 when settled or idle). */
+	public synchronized float lookErrorDeg() {
+		LocalPlayer p = Minecraft.getInstance().player;
+		if (p == null || lookTargetYaw == null) return 0.0F;
+		float dy = Math.abs(Mth.wrapDegrees(lookTargetYaw - p.getYRot()));
+		float dp = Math.abs((lookTargetPitch == null ? p.getXRot() : lookTargetPitch) - p.getXRot());
+		return Math.max(dy, dp);
 	}
 
-	public synchronized void stopMining() {
-		this.miningPos = null;
+	public synchronized boolean hasAppliedLook() {
+		return !Float.isNaN(lastAppliedYaw);
 	}
+
+	public synchronized float lastAppliedYaw() {
+		return lastAppliedYaw;
+	}
+
+	public synchronized float lastAppliedPitch() {
+		return lastAppliedPitch;
+	}
+
+	// desired key state, so a watcher can tell bot input from real input
+	public synchronized boolean wantsForward() { return fwd; }
+	public synchronized boolean wantsBack() { return back; }
+	public synchronized boolean wantsLeft() { return left; }
+	public synchronized boolean wantsRight() { return right; }
+	public synchronized boolean wantsJump() { return jumpHeld || jumpOnceTicks > 0; }
+	public synchronized boolean wantsSneak() { return sneak; }
+	public synchronized boolean wantsSprint() { return sprint; }
+
+	// diagnostics
+	public synchronized boolean isDrivingKeys() { return drivingKeys; }
+	public synchronized float pendingLookYaw() { return lookTargetYaw == null ? Float.NaN : lookTargetYaw; }
+	public synchronized float pendingLookPitch() { return lookTargetPitch == null ? Float.NaN : lookTargetPitch; }
+	public synchronized String navStateText() { return navState; }
+	public synchronized int navRemainingNodes() { return path == null ? -1 : Math.max(0, path.size() - pathIndex); }
 
 	public synchronized void startNavigation(List<BlockPos> path, BlockPos target, double reachRadius, boolean sprint, long deadlineMillis) {
 		this.path = path;
@@ -145,11 +207,26 @@ public final class BotController {
 		}
 
 		synchronized (this) {
+			// A real player has the controls: drop everything and let them drive.
+			if (HumanControl.suspended()) {
+				stopAllMovement();
+				attackHeld = false;
+				useHeld = false;
+				clearLookTarget();
+				if (drivingKeys) {
+					releaseKeys(mc.options);
+					drivingKeys = false;
+				}
+				return;
+			}
+
 			if (path != null) {
 				steer(mc, p);
 			}
+			applyWaterSafety(p);
 			tickLook(p);
-			boolean driving = fwd || back || left || right || jumpHeld || sneak || sprint || jumpOnceTicks > 0 || path != null;
+			boolean driving = fwd || back || left || right || jumpHeld || sneak || sprint
+					|| jumpOnceTicks > 0 || attackHeld || useHeld || path != null;
 			if (driving) {
 				applyKeys(mc.options);
 				drivingKeys = true;
@@ -161,7 +238,6 @@ public final class BotController {
 				drivingKeys = false;
 			}
 			if (jumpOnceTicks > 0) jumpOnceTicks--;
-			tickMining(mc);
 		}
 	}
 
@@ -173,6 +249,8 @@ public final class BotController {
 		o.keyShift.setDown(sneak);
 		o.keySprint.setDown(sprint);
 		o.keyJump.setDown(jumpHeld || jumpOnceTicks > 0);
+		o.keyAttack.setDown(attackHeld);
+		o.keyUse.setDown(useHeld);
 	}
 
 	private void releaseKeys(Options o) {
@@ -183,23 +261,8 @@ public final class BotController {
 		o.keyShift.setDown(false);
 		o.keySprint.setDown(false);
 		o.keyJump.setDown(false);
-	}
-
-	private void tickMining(Minecraft mc) {
-		if (miningPos == null) return;
-		MultiPlayerGameMode gm = mc.gameMode;
-		if (gm == null || mc.level == null) {
-			miningPos = null;
-			return;
-		}
-		if (mc.level.getBlockState(miningPos).isAir()) {
-			gm.stopDestroyBlock();
-			miningPos = null;
-			return;
-		}
-		gm.continueDestroyBlock(miningPos, miningFace);
-		// Keep the arm swinging while digging, the way a real player's does.
-		if (++swingTimer % 4 == 0) mc.player.swing(InteractionHand.MAIN_HAND);
+		o.keyAttack.setDown(false);
+		o.keyUse.setDown(false);
 	}
 
 	private void tickLook(LocalPlayer p) {
@@ -218,11 +281,15 @@ public final class BotController {
 				p.getXRot() + Mth.clamp(dPitch, -LOOK_STEP_DEG, LOOK_STEP_DEG));
 	}
 
-	private static void applyLook(LocalPlayer p, float yaw, float pitch) {
-		p.setYRot(yaw);
-		p.setXRot(Mth.clamp(pitch, -90.0F, 90.0F));
-		p.setYHeadRot(yaw);
-		p.setYBodyRot(yaw);
+	private void applyLook(LocalPlayer p, float yaw, float pitch) {
+		float cy = Mth.wrapDegrees(yaw);
+		float cp = Mth.clamp(pitch, -90.0F, 90.0F);
+		p.setYRot(cy);
+		p.setXRot(cp);
+		p.setYHeadRot(cy);
+		p.setYBodyRot(cy);
+		lastAppliedYaw = cy;
+		lastAppliedPitch = cp;
 	}
 
 	private void steer(Minecraft mc, LocalPlayer p) {
@@ -249,15 +316,34 @@ public final class BotController {
 		float yaw = (float) (Mth.atan2(dz, dx) * (180.0 / Math.PI)) - 90.0F;
 		lookAtTarget(yaw, 0.0F);
 
-		fwd = true;
-		back = left = right = false;
 		boolean inWater = p.isInWater();
-		sprint = navSprint && !inWater;
+
+		// Sprint like a player does: over a longer haul, and always in water — sprinting is exactly
+		// what puts the player into the swimming pose, so disabling it there makes them crawl.
+		sprint = navSprint || inWater || p.position().distanceTo(Vec3.atBottomCenterOf(navTarget)) > 4.0;
+		if (sneak) sprint = false;
 
 		if (inWater) {
-			// Swim: keep stroking forward and bob upward toward the next node.
-			jumpOnceTicks = Math.max(jumpOnceTicks, 1);
-		} else if (node.getY() > p.getY() + 0.4) {
+			// Look along the path including up/down, so swimming can descend to a submerged node.
+			double dyNode = (node.getY() + 0.5) - p.getEyeY();
+			float pitch = (float) (-(Mth.atan2(dyNode, Math.max(horiz, 0.01)) * (180.0 / Math.PI)));
+			lookAtTarget(yaw, Mth.clamp(pitch, -70.0F, 45.0F));
+		} else {
+			lookAtTarget(yaw, 0.0F);
+		}
+
+		fwd = true;
+		back = left = right = false;
+
+		// Stroke upward when the next node is higher, or to keep the head at the surface on a level
+		// swim. When the node is below, do NOT jump — that is how the bot dives to it.
+		boolean needHeight = node.getY() > p.getY() + 0.4;
+		boolean descending = node.getY() < p.getY() - 0.4;
+		if (inWater) {
+			if (needHeight || (p.isUnderWater() && !descending)) {
+				jumpOnceTicks = Math.max(jumpOnceTicks, 1);
+			}
+		} else if (needHeight) {
 			jumpOnceTicks = Math.max(jumpOnceTicks, 1);
 		}
 		if (horiz < 0.55) {
@@ -291,6 +377,32 @@ public final class BotController {
 		this.path = fresh;
 		this.pathIndex = 0;
 		return true;
+	}
+
+	/**
+	 * Never drown. The moment the head goes under with the air bar running low, the bot drops what it
+	 * is doing and strokes upward until it can breathe again. Runs after navigation so it always wins,
+	 * and works even when no task is active — otherwise the bot would happily leave the player bobbing
+	 * under the surface until they died.
+	 */
+	private void applyWaterSafety(LocalPlayer p) {
+		boolean under = p.isUnderWater();
+		if (under) {
+			if (p.getAirSupply() <= AIR_SURFACE_AT) surfacing = true;
+		} else if (!p.isInWater() || p.getAirSupply() >= AIR_CLEAR_AT) {
+			// Head is out of the water (or we are back on land): safe again.
+			surfacing = false;
+		}
+		if (surfacing) {
+			// Override whatever the task wanted: rise straight up until we can breathe.
+			fwd = back = left = right = false;
+			sprint = false;
+			jumpHeld = true;
+			surfaceJumpHeld = true;
+		} else if (surfaceJumpHeld) {
+			jumpHeld = false;
+			surfaceJumpHeld = false;
+		}
 	}
 
 	private void stopNavigationInternal(String reason) {

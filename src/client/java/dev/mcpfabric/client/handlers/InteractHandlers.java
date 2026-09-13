@@ -24,30 +24,6 @@ public final class InteractHandlers {
 	private InteractHandlers() {}
 
 	public static void register(RpcRouter router) {
-		router.register("interact.breakBlock", ctx -> ClientMc.call(() -> {
-			requireControl();
-			MultiPlayerGameMode gm = ClientMc.gameMode();
-			LocalPlayer p = ClientMc.player();
-			BlockPos pos = BlockPos.containing(ctx.getDouble("x"), ctx.getDouble("y"), ctx.getDouble("z"));
-			Direction face = faceToward(pos, p.getEyePosition());
-			String mode = ctx.optString("mode", "survival");
-			JsonObject o = new JsonObject();
-			if ("instant".equals(mode)) {
-				boolean broke = gm.destroyBlock(pos);
-				p.swing(InteractionHand.MAIN_HAND);
-				o.addProperty("broke", broke);
-				o.addProperty("mode", "instant");
-			} else {
-				gm.startDestroyBlock(pos, face);
-				BotController.get().startMining(pos, face);
-				p.swing(InteractionHand.MAIN_HAND);
-				o.addProperty("started", true);
-				o.addProperty("mode", "survival");
-				o.addProperty("note", "Mining continues each tick; poll get_block to confirm it broke.");
-			}
-			return o;
-		}));
-
 		router.register("interact.placeBlock", ctx -> ClientMc.call(() -> {
 			requireControl();
 			MultiPlayerGameMode gm = ClientMc.gameMode();

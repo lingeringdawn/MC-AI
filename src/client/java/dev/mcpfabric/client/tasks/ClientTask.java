@@ -41,6 +41,30 @@ public abstract class ClientTask {
 		return status;
 	}
 
+	/** Wall-clock time since the task was constructed (ms). */
+	public final long elapsedMs() {
+		return System.currentTimeMillis() - startMs;
+	}
+
+	/** Time left before the task's deadline (0 once past it). */
+	public final long remainingMsLeft() {
+		return remainingMs();
+	}
+
+	/**
+	 * Live, task-specific progress for watchers — read every tick by the observer, so it must be
+	 * cheap and must not advance any state. Subclasses override to expose "what is it doing right
+	 * now" (target, counters, phase); the default is nothing beyond the generic timing info.
+	 */
+	public JsonObject progress() {
+		return new JsonObject();
+	}
+
+	/** Short human label for this task, e.g. "mine minecraft:oak_log at 21,64,-110". */
+	public String describe() {
+		return getClass().getSimpleName();
+	}
+
 	public JsonObject result() {
 		JsonObject r = result;
 		return r != null ? r : new JsonObject();

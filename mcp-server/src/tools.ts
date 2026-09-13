@@ -54,6 +54,31 @@ const playerRef = {
 const READ = { readOnlyHint: true } as const;
 const WRITE = { destructiveHint: true } as const;
 
+/**
+ * How long a blocking action's HTTP call waits before returning `state:"running"` so the caller can
+ * keep polling. Every blocking action returns a live observation snapshot either way, so a short
+ * wait means "watch while it happens" instead of "wait blindly until it is over".
+ */
+const waitSeconds = (maxTimeout: number) =>
+  z
+    .number()
+    .int()
+    .min(0)
+    .max(maxTimeout)
+    .optional()
+    .describe(
+      `Deprecated/optional cap on how long this call blocks before returning state:"running" (0 = return immediately). ` +
+        `Omit to block until the action settles. Either way the result carries an "observe" snapshot of the world ` +
+        `(health, threats, drops, crosshair, progress, rolling log) plus "elapsedMs"/"remainingMs"/"progress".`,
+    );
+
+/** The live-watch payload attached to every action result. */
+const OBSERVE_NOTE =
+  ' The result includes an "observe" snapshot sampled every tick while it ran: vitals, nearby hostiles, drops on the ' +
+  'ground, what the crosshair is on, the task\'s own "progress", and a rolling "log" of notable moments — so the ' +
+  'world is visible during the action instead of only after it. Poll action_status / observe to keep watching, and ' +
+  'read observe.danger (0 fine / 1 caution / 2 act now) to decide whether to action_cancel.';
+
 // ----- catalogue ------------------------------------------------------------------------------
 
 export const TOOLS: ToolDef[] = [
@@ -531,8 +556,8 @@ export const TOOLS: ToolDef[] = [
     method: "inventory.craft",
     title: "Craft an item with a real grid",
     description:
-      "Client-only. Craft by driving the actual crafting menu with container clicks — the recipe match, ingredient consumption and result count all come from the game (nothing is spawned). " +
-      "Provide 'grid': a row-major array of item ids (or null) whose length selects the grid — 4 for the player's 2x2 grid (always available) or 9 for a placed crafting table (3x3; right-click the table first so its menu is open). " +
+      "Client-only. Craft the way a player does: it opens the container screen (the inventory, like pressing E) and clicks the grid one slot per tick, so the crafting is visible in-game and blocks until it finishes — the recipe match, ingredient consumption and result count all come from the game (nothing is spawned). " +
+      "Provide 'grid': a row-major array of item ids (or null) whose length selects the grid — 4 for the player's 2x2 grid (opened automatically) or 9 for a placed crafting table (3x3; right-click the table first so its menu is open). " +
       "'count' caps how many times to craft (limited by available materials). Returns the crafted amount and the output item.",
     inputSchema: {
       grid: z
@@ -576,12 +601,14 @@ export const TOOLS: ToolDef[] = [
     method: "action.moveTo",
     title: "Walk to a position (blocking)",
     description:
-      "Client-only, BLOCKING. Walk the player to within 'reachRadius' of a target and return only when the walk settles (reached / no_path / timeout). One call replaces 'navigate_to + poll navigation_status'.",
+      "Client-only, BLOCKING. Walk the player to within 'reachRadius' of a target and return when the walk settles (reached / no_path / timeout), or earlier if 'waitSeconds' caps the wait." +
+      OBSERVE_NOTE,
     inputSchema: {
       ...vec3(),
       reachRadius: z.number().min(0).max(16).optional().default(1).describe("Stop when within this many blocks of the target."),
       sprint: z.boolean().optional().default(false),
       timeoutSeconds: z.number().int().min(1).max(120).optional().default(30),
+      waitSeconds: waitSeconds(120),
     },
     annotations: WRITE,
   },
@@ -590,10 +617,12 @@ export const TOOLS: ToolDef[] = [
     method: "action.mineBlock",
     title: "Mine a block (blocking)",
     description:
-      "Client-only, BLOCKING. The whole 'dig this block' intent in one call: walk into reach (A*), face the block, auto-select the best tool in the hotbar, then mine with realistic survival timing until the block is gone. Returns state mined / unreachable / timeout.",
+      "Client-only, BLOCKING. The whole 'dig this block' intent in one call: walk into reach (A*), face the block, auto-select the best tool in the hotbar, then mine with realistic survival timing until the block is gone. Returns state mined / unreachable / timeout." +
+      OBSERVE_NOTE,
     inputSchema: {
       ...vec3(),
       timeoutSeconds: z.number().int().min(1).max(120).optional().default(30),
+      waitSeconds: waitSeconds(120),
     },
     annotations: WRITE,
   },
@@ -602,10 +631,12 @@ export const TOOLS: ToolDef[] = [
     method: "action.collectItems",
     title: "Collect nearby drops (blocking)",
     description:
-      "Client-only, BLOCKING. Walk over dropped item entities within 'radius' so the player picks them up; returns when none remain in range or the budget elapses.",
+      "Client-only, BLOCKING. Walk over dropped item entities within 'radius' so the player picks them up; returns when none remain in range or the budget elapses." +
+      OBSERVE_NOTE,
     inputSchema: {
       radius: z.number().min(1).max(48).optional().default(16),
       timeoutSeconds: z.number().int().min(1).max(120).optional().default(30),
+      waitSeconds: waitSeconds(120),
     },
     annotations: WRITE,
   },
@@ -613,7 +644,23 @@ export const TOOLS: ToolDef[] = [
     name: "action_status",
     method: "action.status",
     title: "Current action status",
-    description: "Client-only. Report the running/blocking action's state and its settled result (if any).",
+    description:
+      "Client-only. Report the running/blocking action's state, its settled result (if any), and a full live " +
+      'observation snapshot under "observe" (vitals, hostiles, drops, crosshair, progress, rolling log, danger level). ' +
+      "Poll this while a long action runs to watch the world instead of waiting blindly.",
+    inputSchema: {},
+    annotations: READ,
+  },
+  {
+    name: "observe",
+    method: "action.observe",
+    title: "Observe the world right now",
+    description:
+      "Client-only, READ-ONLY. A live situational snapshot, sampled every tick: your vitals (health/food/air/position), " +
+      "nearby hostile mobs with distance, dropped items on the ground, what the crosshair is on, whether a blocking " +
+      "action is running and what it is doing, and a rolling log of notable moments. Use it to look before you act, or " +
+      'to keep watching while another call is in flight; "observe.danger" is 0 (fine) / 1 (caution) / 2 (act now). ' +
+      "Works whether idle or mid-action.",
     inputSchema: {},
     annotations: READ,
   },
@@ -631,11 +678,13 @@ export const TOOLS: ToolDef[] = [
     method: "action.mineVein",
     title: "Mine a whole vein/tree (blocking)",
     description:
-      "Client-only, BLOCKING. Mine a connected cluster of same-id blocks — a whole tree, an ore vein, a stack of logs. Walks between blocks as needed and follows the cluster to exhaustion (bounded by 'max'). One call = 'chop that tree down'.",
+      "Client-only, BLOCKING. Mine a connected cluster of same-id blocks — a whole tree, an ore vein, a stack of logs. Walks between blocks as needed and follows the cluster to exhaustion (bounded by 'max'). One call = 'chop that tree down'." +
+      OBSERVE_NOTE,
     inputSchema: {
       ...vec3(),
       max: z.number().int().min(1).max(512).optional().default(64).describe("Maximum number of blocks to mine."),
       timeoutSeconds: z.number().int().min(1).max(300).optional().default(60),
+      waitSeconds: waitSeconds(300),
     },
     annotations: WRITE,
   },
@@ -648,6 +697,7 @@ export const TOOLS: ToolDef[] = [
       "Client-only, BLOCKING. Hold the use key on the best food in the hotbar until the hunger bar is full (or no food is left). Uses the vanilla eating timing.",
     inputSchema: {
       timeoutSeconds: z.number().int().min(1).max(60).optional().default(20),
+      waitSeconds: waitSeconds(60),
     },
     annotations: WRITE,
   },
@@ -661,6 +711,7 @@ export const TOOLS: ToolDef[] = [
       uuid: z.string().describe("Entity UUID to attack."),
       maxSwings: z.number().int().min(0).max(500).optional().default(0).describe("Stop after this many hits (0 = until it dies)."),
       timeoutSeconds: z.number().int().min(1).max(120).optional().default(30),
+      waitSeconds: waitSeconds(120),
     },
     annotations: WRITE,
   },

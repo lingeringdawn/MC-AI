@@ -1,5 +1,7 @@
 package dev.mcpfabric.client.handlers;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import dev.mcpfabric.McpFabric;
 import dev.mcpfabric.bridge.Json;
@@ -10,12 +12,14 @@ import dev.mcpfabric.client.ClientMc;
 import dev.mcpfabric.client.tasks.AttackTask;
 import dev.mcpfabric.client.tasks.ClientTask;
 import dev.mcpfabric.client.tasks.CollectItemsTask;
+import dev.mcpfabric.client.tasks.CraftTask;
 import dev.mcpfabric.client.tasks.EatTask;
 import dev.mcpfabric.client.tasks.MineBlockTask;
 import dev.mcpfabric.client.tasks.MineVeinTask;
 import dev.mcpfabric.client.tasks.MoveToTask;
 import dev.mcpfabric.client.tasks.TaskManager;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.item.Item;
 
 import java.util.UUID;
 
@@ -51,7 +55,11 @@ public final class ActionHandlers {
 				uuid(ctx2, "uuid"), Math.max(0, ctx2.optInt("maxSwings", 0))),
 				ctx.optInt("timeoutSeconds", 30)));
 
+		router.register("action.craft", ActionHandlers::craftAction);
+
 		router.register("action.status", ctx -> TaskManager.get().status());
+
+		router.register("action.observe", ctx -> TaskManager.get().observe());
 
 		router.register("action.cancel", ctx -> ClientMc.call(() -> {
 			TaskManager.get().cancel(ClientMc.mc());
@@ -61,6 +69,42 @@ public final class ActionHandlers {
 
 	private interface TaskFactory {
 		ClientTask create(RpcContext ctx) throws RpcException;
+	}
+
+	/**
+	 * Real crafting as a blocking action: opens the container screen and clicks the grid one slot per
+	 * tick, so the whole sequence is visible in-game instead of happening invisibly. {@code grid} is
+	 * row-major — 4 entries for the player's 2x2 inventory grid, 9 for an open crafting table.
+	 */
+	static JsonObject craftAction(RpcContext ctx) throws RpcException {
+		Item[] wanted = parseGrid(ctx);
+		int count = Math.max(1, Math.min(64, ctx.optInt("count", 1)));
+		return run(ctx, ctx2 -> new CraftTask(wanted, count), ctx.optInt("timeoutSeconds", 60));
+	}
+
+	/** Parse the row-major 'grid' array into one item per cell ({@code null} = empty cell). */
+	private static Item[] parseGrid(RpcContext ctx) throws RpcException {
+		if (!ctx.has("grid") || !ctx.params().get("grid").isJsonArray()) {
+			throw RpcException.badRequest("Missing 'grid' array.");
+		}
+		JsonArray arr = ctx.params().getAsJsonArray("grid");
+		if (arr.size() != 4 && arr.size() != 9) {
+			throw RpcException.badRequest("'grid' needs 4 entries (player 2x2) or 9 (crafting table 3x3); got "
+					+ arr.size() + ".");
+		}
+		Item[] wanted = new Item[arr.size()];
+		boolean any = false;
+		for (int i = 0; i < arr.size(); i++) {
+			JsonElement e = arr.get(i);
+			if (e == null || e.isJsonNull()) continue;
+			String id = e.getAsString();
+			Item item = InventoryHandlers.itemById(id);
+			if (item == null) throw RpcException.badRequest("Unknown item id: " + id);
+			wanted[i] = item;
+			any = true;
+		}
+		if (!any) throw RpcException.badRequest("'grid' contains no items.");
+		return wanted;
 	}
 
 	private static JsonObject run(RpcContext ctx, TaskFactory factory, int timeoutSeconds) throws RpcException {
@@ -74,7 +118,13 @@ public final class ActionHandlers {
 			}
 			return Json.ok("started");
 		});
-		return TaskManager.get().await(secs * 1000L + 2000L);
+		// A caller can cap how long this HTTP call blocks and then keep polling. That keeps a long
+		// action from being cut off by an MCP client's request timeout while still letting the model
+		// watch the world tick via the live snapshot in the returned payload.
+		long waitMs = ctx.has("waitSeconds")
+				? Math.max(0L, ctx.optInt("waitSeconds", 0)) * 1000L
+				: secs * 1000L + 2000L;
+		return TaskManager.get().await(waitMs);
 	}
 
 	private static UUID uuid(RpcContext ctx, String key) throws RpcException {

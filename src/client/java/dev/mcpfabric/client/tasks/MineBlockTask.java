@@ -38,11 +38,31 @@ public final class MineBlockTask extends ClientTask {
 			extra.addProperty("x", miner.pos().getX());
 			extra.addProperty("y", miner.pos().getY());
 			extra.addProperty("z", miner.pos().getZ());
-			extra.addProperty("tool", miner.tool());
 			done("mined", extra);
 		} else if (s == BlockMiner.State.UNREACHABLE) {
 			failed("unreachable");
 		}
+	}
+
+	@Override
+	public JsonObject progress() {
+		JsonObject o = new JsonObject();
+		JsonObject t = new JsonObject();
+		t.addProperty("x", miner.pos().getX());
+		t.addProperty("y", miner.pos().getY());
+		t.addProperty("z", miner.pos().getZ());
+		o.add("target", t);
+		if (Minecraft.getInstance().gameMode != null) {
+			int stage = Minecraft.getInstance().gameMode.getDestroyStage(); // 0-9 while digging
+			if (stage >= 0) o.addProperty("breakStage", stage);
+		}
+		return o;
+	}
+
+	@Override
+	public String describe() {
+		BlockPos p = miner.pos();
+		return "mine block at " + p.getX() + "," + p.getY() + "," + p.getZ();
 	}
 
 	@Override

@@ -1,5 +1,7 @@
 package dev.mcpfabric.client.tasks;
 
+import com.google.gson.JsonObject;
+import dev.mcpfabric.client.BotController;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.component.DataComponents;
@@ -44,7 +46,24 @@ public final class EatTask extends ClientTask {
 			select(p, slot);
 			selectedSlot = slot;
 		}
-		if (!mc.options.keyUse.isDown()) mc.options.keyUse.setDown(true);
+		BotController.get().setUseHeld(true);
+	}
+
+	@Override
+	public JsonObject progress() {
+		LocalPlayer p = Minecraft.getInstance().player;
+		JsonObject o = new JsonObject();
+		if (p != null) {
+			o.addProperty("food", p.getFoodData().getFoodLevel());
+			o.addProperty("usingItem", p.isUsingItem());
+		}
+		o.addProperty("slot", selectedSlot);
+		return o;
+	}
+
+	@Override
+	public String describe() {
+		return "eat until the hunger bar is full";
 	}
 
 	@Override
@@ -53,7 +72,7 @@ public final class EatTask extends ClientTask {
 	}
 
 	private void release(Minecraft mc) {
-		mc.options.keyUse.setDown(false);
+		BotController.get().setUseHeld(false);
 		LocalPlayer p = mc.player;
 		if (p != null) p.stopUsingItem();
 	}

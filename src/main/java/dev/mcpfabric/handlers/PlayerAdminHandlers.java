@@ -34,6 +34,7 @@ public final class PlayerAdminHandlers {
 		router.register("players.get", ctx -> onServer(server -> describe(require(server, ctx.getString("player")))));
 
 		router.register("players.teleport", ctx -> onServer(server -> {
+			requireCommands();
 			ServerPlayer p = require(server, ctx.getString("player"));
 			String name = playerName(p);
 			double x = ctx.getDouble("x"), y = ctx.getDouble("y"), z = ctx.getDouble("z");
@@ -50,12 +51,14 @@ public final class PlayerAdminHandlers {
 		}));
 
 		router.register("players.setGameMode", ctx -> onServer(server -> {
+			requireCommands();
 			ServerPlayer p = require(server, ctx.getString("player"));
 			String mode = ctx.getString("mode");
 			return CommandRunner.run(server, "gamemode " + mode + " " + playerName(p)).toJson();
 		}));
 
 		router.register("players.give", ctx -> onServer(server -> {
+			requireCommands();
 			ServerPlayer p = require(server, ctx.getString("player"));
 			String item = ctx.getString("itemId") + ctx.optString("nbt", "");
 			int count = ctx.optInt("count", 1);
@@ -63,6 +66,7 @@ public final class PlayerAdminHandlers {
 		}));
 
 		router.register("players.applyEffect", ctx -> onServer(server -> {
+			requireCommands();
 			ServerPlayer p = require(server, ctx.getString("player"));
 			String effect = ctx.getString("effectId");
 			int seconds = ctx.optInt("durationSeconds", 30);
@@ -89,6 +93,7 @@ public final class PlayerAdminHandlers {
 		}));
 
 		router.register("players.kick", ctx -> onServer(server -> {
+			requireCommands();
 			ServerPlayer p = require(server, ctx.getString("player"));
 			String reason = ctx.optString("reason", null);
 			String cmd = "kick " + playerName(p) + (reason != null ? " " + reason : "");
@@ -102,6 +107,12 @@ public final class PlayerAdminHandlers {
 		return p.getGameProfile().getName();
 		//?} else
 		/*return p.getGameProfile().name();*/
+	}
+
+	private static void requireCommands() throws RpcException {
+		if (!McpFabric.config().enableCommands) {
+			throw RpcException.unavailable("Cheat/admin powers are disabled (enableCommands=false in mcpfabric.config.json).");
+		}
 	}
 
 	private static ServerPlayer require(MinecraftServer server, String ref) throws RpcException {

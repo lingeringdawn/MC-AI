@@ -41,6 +41,8 @@ public final class LocalPlayerHandlers {
 			o.addProperty("onGround", p.onGround());
 			o.addProperty("inWater", p.isInWater());
 			o.addProperty("sprinting", p.isSprinting());
+			o.addProperty("swimming", p.isSwimming());
+			o.addProperty("pose", p.getPose().name());
 			o.addProperty("sneaking", p.isShiftKeyDown());
 			o.addProperty("usingItem", p.isUsingItem());
 			o.addProperty("selectedSlot", selectedSlot(p.getInventory()));

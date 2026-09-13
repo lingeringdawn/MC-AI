@@ -62,6 +62,21 @@ public final class CollectItemsTask extends ClientTask {
 	}
 
 	@Override
+	public JsonObject progress() {
+		JsonObject o = new JsonObject();
+		o.addProperty("radius", radius);
+		o.addProperty("targetsLeft", countNearby());
+		o.addProperty("navigating", navStarted);
+		return o;
+	}
+
+	@Override
+	public String describe() {
+		return "collect dropped items within " + radius + " blocks ("
+				+ countNearby() + " left)";
+	}
+
+	@Override
 	public void onCancel(Minecraft mc) {
 		BotController.get().stopNavigation("cancelled");
 	}
@@ -71,6 +86,21 @@ public final class CollectItemsTask extends ClientTask {
 		JsonObject extra = new JsonObject();
 		extra.addProperty("pickedApprox", picked);
 		done(state, extra);
+	}
+
+	/** How many dropped items are still inside the collection radius right now. */
+	private int countNearby() {
+		LocalPlayer p = Minecraft.getInstance().player;
+		ClientLevel level = Minecraft.getInstance().level;
+		if (p == null || level == null) return 0;
+		int n = 0;
+		for (Entity e : level.entitiesForRendering()) {
+			if (e instanceof ItemEntity it && it.isAlive()
+					&& p.position().distanceToSqr(it.position()) <= radius * radius) {
+				n++;
+			}
+		}
+		return n;
 	}
 
 	private ItemEntity nearestItem(LocalPlayer p, ClientLevel level) {

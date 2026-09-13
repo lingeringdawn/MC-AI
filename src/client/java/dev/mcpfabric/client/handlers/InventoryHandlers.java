@@ -1,10 +1,6 @@
 package dev.mcpfabric.client.handlers;
 
-import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
 import dev.mcpfabric.bridge.Json;
-import dev.mcpfabric.bridge.RpcContext;
 import dev.mcpfabric.bridge.RpcException;
 import dev.mcpfabric.bridge.RpcRouter;
 import dev.mcpfabric.client.ClientMc;
@@ -16,17 +12,10 @@ import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
 import net.minecraft.resources.ResourceLocation;
 //?} else
 /*import net.minecraft.resources.Identifier;*/
-import net.minecraft.world.inventory.AbstractContainerMenu;
-import net.minecraft.world.inventory.CraftingMenu;
-import net.minecraft.world.inventory.InventoryMenu;
 import net.minecraft.world.item.Item;
-import net.minecraft.world.item.ItemStack;
 //? if <26.1 {
 import net.minecraft.world.inventory.ClickType;
 //?}
-
-import java.util.LinkedHashMap;
-import java.util.Map;
 
 /** Inventory manipulation: hotbar selection, dropping, swapping, and real crafting (2x2 / 3x3). */
 public final class InventoryHandlers {
@@ -66,7 +55,9 @@ public final class InventoryHandlers {
 			return Json.ok("swapped");
 		}));
 
-		router.register("inventory.craft", ctx -> ClientMc.call(() -> craftGrid(ctx)));
+		// Crafting is the very same task as action.craft: it opens the container screen like a player
+		// pressing E and clicks the grid one slot per tick, so it is visible and blocks until done.
+		router.register("inventory.craft", ActionHandlers::craftAction);
 	}
 
 	/**
@@ -80,154 +71,8 @@ public final class InventoryHandlers {
 		/*gm.handleContainerInput(containerId, slot, button, throwItem ? net.minecraft.world.inventory.ContainerInput.THROW : net.minecraft.world.inventory.ContainerInput.PICKUP, p);*/
 	}
 
-	/** Shift-click a slot, moving its contents to the natural target (used for the crafting result). */
-	private static void containerQuickMove(MultiPlayerGameMode gm, int containerId, int slot, LocalPlayer p) {
-		//? if <26.1 {
-		gm.handleInventoryMouseClick(containerId, slot, 0, ClickType.QUICK_MOVE, p);
-		//?} else
-		/*gm.handleContainerInput(containerId, slot, 0, net.minecraft.world.inventory.ContainerInput.QUICK_MOVE, p);*/
-	}
-
-	/**
-	 * Perform a REAL craft using the currently open container grid. It drives the vanilla crafting menu
-	 * with ordinary container clicks, so the recipe match, ingredient consumption, result count and any
-	 * advancement all come from the game itself — nothing is spawned.
-	 *
-	 * <p>{@code grid} is row-major: 4 entries while the player inventory (2x2) is active, or 9 while a
-	 * crafting table (3x3) is open. Each entry is an item id (e.g. "minecraft:oak_planks") or null.
-	 */
-	private static JsonElement craftGrid(RpcContext ctx) throws RpcException {
-		LocalPlayer p = ClientMc.player();
-		MultiPlayerGameMode gm = ClientMc.gameMode();
-		AbstractContainerMenu menu = p.containerMenu;
-
-		final boolean table = menu instanceof CraftingMenu;
-		final boolean inv = menu instanceof InventoryMenu;
-		if (!table && !inv) {
-			throw RpcException.unavailable("No crafting grid is open. The player inventory (2x2) is always "
-					+ "available; right-click a placed crafting table for 3x3.");
-		}
-		final int cols = table ? 3 : 2;
-		final int gridSlots = cols * cols;
-		// Player main-inventory slots inside this menu. CraftingMenu: 0 result, 1-9 grid, 10-45 inv.
-		// InventoryMenu: 0 result, 1-4 grid, 5-8 armor, 9-44 inv, 45 offhand.
-		final int invFrom = table ? 10 : 9;
-		final int invTo = table ? 46 : 45;
-
-		if (!ctx.has("grid") || !ctx.params().get("grid").isJsonArray()) {
-			throw RpcException.badRequest("Missing 'grid' array.");
-		}
-		JsonArray arr = ctx.params().getAsJsonArray("grid");
-		if (arr.size() != gridSlots) {
-			throw RpcException.badRequest("This " + cols + "x" + cols + " grid needs " + gridSlots
-					+ " entries (row-major, null for empty); got " + arr.size() + ".");
-		}
-		int count = Math.max(1, Math.min(64, ctx.optInt("count", 1)));
-
-		Item[] wanted = new Item[gridSlots];
-		for (int i = 0; i < gridSlots; i++) {
-			JsonElement e = arr.get(i);
-			if (e == null || e.isJsonNull()) continue;
-			String id = e.getAsString();
-			Item item = itemById(id);
-			if (item == null) throw RpcException.badRequest("Unknown item id: " + id);
-			wanted[i] = item;
-		}
-		boolean any = false;
-		for (Item w : wanted) {
-			if (w != null) { any = true; break; }
-		}
-		if (!any) throw RpcException.badRequest("'grid' contains no items.");
-
-		if (!menu.getCarried().isEmpty()) {
-			throw RpcException.unavailable("Your cursor is holding an item; place or drop it before crafting.");
-		}
-
-		// Each occupied grid slot costs one item per craft; cap the batch by what the inventory holds.
-		Map<Item, Integer> slotsPerItem = new LinkedHashMap<>();
-		for (Item w : wanted) {
-			if (w != null) slotsPerItem.merge(w, 1, Integer::sum);
-		}
-		int crafts = count;
-		for (Map.Entry<Item, Integer> e : slotsPerItem.entrySet()) {
-			int have = countInInventory(menu, invFrom, invTo, e.getKey());
-			crafts = Math.min(crafts, have / e.getValue());
-		}
-		if (crafts <= 0) {
-			throw RpcException.unavailable("Not enough materials in the inventory for even one craft.");
-		}
-
-		// Place the ingredients.
-		for (int i = 0; i < gridSlots; i++) {
-			if (wanted[i] != null) fillGridSlot(gm, menu, p, wanted[i], 1 + i, crafts, invFrom, invTo);
-		}
-
-		ItemStack preview = menu.slots.get(0).getItem();
-		if (preview.isEmpty()) {
-			clearGrid(gm, menu, p, gridSlots);
-			throw RpcException.badRequest("That grid does not match a valid recipe.");
-		}
-		String outputId = BuiltInRegistries.ITEM.getKey(preview.getItem()).toString();
-		int perCraft = preview.getCount();
-
-		// Take the result. Shift-click auto-deposits into the inventory; loop so this is correct whether
-		// one shift-click crafts a single item or drains the whole grid at once.
-		for (int c = 0; c < crafts; c++) {
-			if (menu.slots.get(0).getItem().isEmpty()) break;
-			containerQuickMove(gm, menu.containerId, 0, p);
-		}
-		clearGrid(gm, menu, p, gridSlots); // safety: return any leftover ingredients
-
-		JsonObject o = new JsonObject();
-		o.addProperty("crafted", crafts);
-		o.addProperty("output", outputId);
-		o.addProperty("outputPerCraft", perCraft);
-		o.addProperty("totalItems", crafts * perCraft);
-		return o;
-	}
-
-	/** Move exactly {@code amount} of {@code item} from the player inventory into menu slot {@code dst}. */
-	private static void fillGridSlot(MultiPlayerGameMode gm, AbstractContainerMenu menu, LocalPlayer p,
-			Item item, int dst, int amount, int invFrom, int invTo) throws RpcException {
-		int remaining = amount;
-		while (remaining > 0) {
-			int src = findInInventory(menu, invFrom, invTo, item);
-			if (src < 0) throw RpcException.unavailable("Ran out of materials while filling the grid.");
-			int take = Math.min(remaining, menu.slots.get(src).getItem().getCount());
-			containerClick(gm, menu.containerId, src, 0, false, p); // pick the stack up
-			for (int i = 0; i < take; i++) {
-				containerClick(gm, menu.containerId, dst, 1, false, p); // right-click: place one
-			}
-			containerClick(gm, menu.containerId, src, 0, false, p); // put the remainder back
-			remaining -= take;
-		}
-	}
-
-	/** Shift-click every non-empty grid slot back into the inventory. */
-	private static void clearGrid(MultiPlayerGameMode gm, AbstractContainerMenu menu, LocalPlayer p, int gridSlots) {
-		for (int i = 1; i <= gridSlots; i++) {
-			if (!menu.slots.get(i).getItem().isEmpty()) containerQuickMove(gm, menu.containerId, i, p);
-		}
-	}
-
-	private static int findInInventory(AbstractContainerMenu menu, int from, int to, Item item) {
-		for (int i = from; i < to; i++) {
-			ItemStack st = menu.slots.get(i).getItem();
-			if (!st.isEmpty() && st.getItem() == item) return i;
-		}
-		return -1;
-	}
-
-	private static int countInInventory(AbstractContainerMenu menu, int from, int to, Item item) {
-		int n = 0;
-		for (int i = from; i < to; i++) {
-			ItemStack st = menu.slots.get(i).getItem();
-			if (!st.isEmpty() && st.getItem() == item) n += st.getCount();
-		}
-		return n;
-	}
-
-	private static Item itemById(String id) {
+	/** Resolve an item id ("oak_log" or "minecraft:oak_log"); null when unknown. */
+	public static Item itemById(String id) {
 		String normalized = id.indexOf(':') >= 0 ? id : "minecraft:" + id;
 		//? if <1.21.11 {
 		ResourceLocation rl = ResourceLocation.tryParse(normalized);

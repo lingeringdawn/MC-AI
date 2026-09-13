@@ -90,7 +90,9 @@ public final class AStarPathfinder {
 
 				if (canOccupy(h)) {
 					next = h;
-					if (liquid(h)) moveCost = 1.4; // wading / swimming is slower
+					// Water is slow and can drain the air bar, so land routes should win ties: wading
+					// costs a bit more than walking, being fully submerged costs a lot.
+					if (liquid(h)) moveCost = liquid(h.below()) ? 3.0 : 1.6;
 				} else if (canOccupy(h.above()) && passable(current.pos.above().above())) {
 					next = h.above(); // step / swim up
 					moveCost = 1.5;

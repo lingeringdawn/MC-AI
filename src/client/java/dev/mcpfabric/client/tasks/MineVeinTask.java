@@ -121,6 +121,31 @@ public final class MineVeinTask extends ClientTask {
 	}
 
 	@Override
+	public JsonObject progress() {
+		JsonObject o = new JsonObject();
+		o.addProperty("block", targetId);
+		o.addProperty("mined", mined);
+		o.addProperty("max", max);
+		o.addProperty("queued", queue.size());
+		o.addProperty("remaining", remaining);
+		o.addProperty("phase", collecting ? "collecting" : "mining");
+		if (current != null) {
+			JsonObject c = new JsonObject();
+			c.addProperty("x", current.getX());
+			c.addProperty("y", current.getY());
+			c.addProperty("z", current.getZ());
+			o.add("current", c);
+		}
+		return o;
+	}
+
+	@Override
+	public String describe() {
+		return "mine " + (targetId.isEmpty() ? "vein" : targetId) + " at " + seed.getX() + "," + seed.getY()
+				+ "," + seed.getZ() + " (max " + max + ")";
+	}
+
+	@Override
 	public void onCancel(Minecraft mc) {
 		if (miner != null) miner.cancel();
 		BotController.get().stopNavigation("cancelled");

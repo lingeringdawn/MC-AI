@@ -30,10 +30,22 @@ public final class McpConfig {
 	public int callTimeoutMs = 8000;
 
 	// capability gates ------------------------------------------------------------------------
-	public boolean enableWorldWrite = true;
-	public boolean enableCommands = true;
+	// Cheat-like powers are OFF by default: the AI must act through real player operations.
+	public boolean enableWorldWrite = false;
+	public boolean enableCommands = false;
 	public boolean enablePlayerControl = true;
 	public boolean enableVision = true;
+
+	/**
+	 * Sample the world every tick while a blocking action runs, so callers can see health, nearby
+	 * hostiles, drops and task progress instead of staring at an opaque in-flight call.
+	 */
+	public boolean enableTaskObservation = true;
+	/**
+	 * When observing, abort a running action as soon as the situation becomes critical (about to die,
+	 * or a hostile mob inside melee range). Off by default: aborting is a judgement call.
+	 */
+	public boolean abortTaskOnDanger = false;
 
 	public transient Path source;
 

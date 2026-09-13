@@ -20,6 +20,9 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
  * {@link McpFabric} and drives the {@link BotController} once per client tick.
  */
 public class McpFabricClient implements ClientModInitializer {
+	/** One-shot: single-player auto-pauses on focus loss, which would freeze the bot mid-action. */
+	private static boolean pausePatched;
+
 	@Override
 	public void onInitializeClient() {
 		RpcRouter router = McpFabric.router();
@@ -39,8 +42,24 @@ public class McpFabricClient implements ClientModInitializer {
 		ClientChatHandlers.register(router); // client variant of chat.send (speaks as local player)
 		ClientEvents.register(McpFabric.events());
 
+		// Single-player pauses itself the moment the window loses focus, which would stall every bot
+		// action mid-swing while the human is in another window. Keep the world ticking instead; the
+		// bot still only moves when it has control (see HumanControl). This waits for the first tick:
+		// Minecraft.options does not exist yet while mod entrypoints are running.
+		ClientTickEvents.END_CLIENT_TICK.register(client -> {
+			if (!pausePatched) {
+				client.options.pauseOnLostFocus = false;
+				pausePatched = true;
+				McpFabric.LOGGER.info("[mcpfabric] pause-on-lost-focus disabled");
+			}
+			HumanControl.tick(client);
+		});
 		ClientTickEvents.END_CLIENT_TICK.register(client -> BotController.get().onClientTick(client));
-		ClientTickEvents.END_CLIENT_TICK.register(client -> TaskManager.get().tick(client));
+		ClientTickEvents.END_CLIENT_TICK.register(client -> {
+			TaskManager.get().setWatching(McpFabric.config().enableTaskObservation);
+			TaskManager.get().setAbortOnDanger(McpFabric.config().abortTaskOnDanger);
+			TaskManager.get().tick(client);
+		});
 
 		McpFabric.LOGGER.info("[mcpfabric] client handlers registered");
 	}
