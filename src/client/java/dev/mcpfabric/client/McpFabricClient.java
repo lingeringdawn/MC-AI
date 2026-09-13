@@ -2,6 +2,7 @@ package dev.mcpfabric.client;
 
 import dev.mcpfabric.McpFabric;
 import dev.mcpfabric.bridge.RpcRouter;
+import dev.mcpfabric.client.handlers.ActionHandlers;
 import dev.mcpfabric.client.handlers.ClientChatHandlers;
 import dev.mcpfabric.client.handlers.ControlHandlers;
 import dev.mcpfabric.client.handlers.InteractHandlers;
@@ -9,6 +10,7 @@ import dev.mcpfabric.client.handlers.InventoryHandlers;
 import dev.mcpfabric.client.handlers.LocalPlayerHandlers;
 import dev.mcpfabric.client.handlers.NavHandlers;
 import dev.mcpfabric.client.handlers.VisionHandlers;
+import dev.mcpfabric.client.tasks.TaskManager;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 
@@ -31,10 +33,12 @@ public class McpFabricClient implements ClientModInitializer {
 		InventoryHandlers.register(router);
 		VisionHandlers.register(router);
 		NavHandlers.register(router);
+		ActionHandlers.register(router);
 		ClientChatHandlers.register(router); // client variant of chat.send (speaks as local player)
 		ClientEvents.register(McpFabric.events());
 
 		ClientTickEvents.END_CLIENT_TICK.register(client -> BotController.get().onClientTick(client));
+		ClientTickEvents.END_CLIENT_TICK.register(client -> TaskManager.get().tick(client));
 
 		McpFabric.LOGGER.info("[mcpfabric] client handlers registered");
 	}

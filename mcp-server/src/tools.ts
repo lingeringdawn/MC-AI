@@ -522,6 +522,24 @@ export const TOOLS: ToolDef[] = [
     description: "Client-only. Swap the items in two inventory slots via container clicks (player inventory must be the active screen-less context).",
     inputSchema: { slotA: z.number().int().min(0).max(45), slotB: z.number().int().min(0).max(45) },
   },
+  {
+    name: "craft_item",
+    method: "inventory.craft",
+    title: "Craft an item with a real grid",
+    description:
+      "Client-only. Craft by driving the actual crafting menu with container clicks — the recipe match, ingredient consumption and result count all come from the game (nothing is spawned). " +
+      "Provide 'grid': a row-major array of item ids (or null) whose length selects the grid — 4 for the player's 2x2 grid (always available) or 9 for a placed crafting table (3x3; right-click the table first so its menu is open). " +
+      "'count' caps how many times to craft (limited by available materials). Returns the crafted amount and the output item.",
+    inputSchema: {
+      grid: z
+        .array(z.string().nullable())
+        .min(4)
+        .max(9)
+        .describe('Row-major grid contents: 4 entries for the player 2x2 grid, 9 for a crafting table 3x3. Use null for empty slots, e.g. ["minecraft:oak_log", null, null, null].'),
+      count: z.number().int().min(1).max(64).optional().default(1).describe("How many times to craft (capped by available materials)."),
+    },
+    annotations: WRITE,
+  },
 
   // ===== vision (client) =====================================================================
   {
@@ -576,6 +594,62 @@ export const TOOLS: ToolDef[] = [
     title: "Stop navigation",
     description: "Client-only. Cancel any active navigation and release movement.",
     inputSchema: {},
+  },
+
+  // ===== actions (client, blocking) ==========================================================
+  {
+    name: "move_to",
+    method: "action.moveTo",
+    title: "Walk to a position (blocking)",
+    description:
+      "Client-only, BLOCKING. Walk the player to within 'reachRadius' of a target and return only when the walk settles (reached / no_path / timeout). One call replaces 'navigate_to + poll navigation_status'.",
+    inputSchema: {
+      ...vec3(),
+      reachRadius: z.number().min(0).max(16).optional().default(1).describe("Stop when within this many blocks of the target."),
+      sprint: z.boolean().optional().default(false),
+      timeoutSeconds: z.number().int().min(1).max(120).optional().default(30),
+    },
+    annotations: WRITE,
+  },
+  {
+    name: "mine_block",
+    method: "action.mineBlock",
+    title: "Mine a block (blocking)",
+    description:
+      "Client-only, BLOCKING. The whole 'dig this block' intent in one call: walk into reach (A*), face the block, auto-select the best tool in the hotbar, then mine with realistic survival timing until the block is gone. Returns state mined / unreachable / timeout.",
+    inputSchema: {
+      ...vec3(),
+      timeoutSeconds: z.number().int().min(1).max(120).optional().default(30),
+    },
+    annotations: WRITE,
+  },
+  {
+    name: "collect_items",
+    method: "action.collectItems",
+    title: "Collect nearby drops (blocking)",
+    description:
+      "Client-only, BLOCKING. Walk over dropped item entities within 'radius' so the player picks them up; returns when none remain in range or the budget elapses.",
+    inputSchema: {
+      radius: z.number().min(1).max(48).optional().default(16),
+      timeoutSeconds: z.number().int().min(1).max(120).optional().default(30),
+    },
+    annotations: WRITE,
+  },
+  {
+    name: "action_status",
+    method: "action.status",
+    title: "Current action status",
+    description: "Client-only. Report the running/blocking action's state and its settled result (if any).",
+    inputSchema: {},
+    annotations: READ,
+  },
+  {
+    name: "action_cancel",
+    method: "action.cancel",
+    title: "Cancel the current action",
+    description: "Client-only. Cancel the running blocking action and release movement/mining.",
+    inputSchema: {},
+    annotations: WRITE,
   },
 
   // ===== events ==============================================================================
