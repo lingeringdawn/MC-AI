@@ -10,6 +10,7 @@ import dev.mcpfabric.client.ClientMc;
 import dev.mcpfabric.client.tasks.ClientTask;
 import dev.mcpfabric.client.tasks.CollectItemsTask;
 import dev.mcpfabric.client.tasks.MineBlockTask;
+import dev.mcpfabric.client.tasks.MineVeinTask;
 import dev.mcpfabric.client.tasks.MoveToTask;
 import dev.mcpfabric.client.tasks.TaskManager;
 import net.minecraft.core.BlockPos;
@@ -31,6 +32,11 @@ public final class ActionHandlers {
 		router.register("action.mineBlock", ctx -> run(ctx, ctx2 -> new MineBlockTask(
 				BlockPos.containing(ctx2.getDouble("x"), ctx2.getDouble("y"), ctx2.getDouble("z"))),
 				ctx.optInt("timeoutSeconds", 30)));
+
+		router.register("action.mineVein", ctx -> run(ctx, ctx2 -> new MineVeinTask(
+				BlockPos.containing(ctx2.getDouble("x"), ctx2.getDouble("y"), ctx2.getDouble("z")),
+				Math.max(1, Math.min(512, ctx2.optInt("max", 64)))),
+				ctx.optInt("timeoutSeconds", 60)));
 
 		router.register("action.collectItems", ctx -> run(ctx, ctx2 -> new CollectItemsTask(
 				ctx2.optDouble("radius", 16.0)), ctx.optInt("timeoutSeconds", 30)));

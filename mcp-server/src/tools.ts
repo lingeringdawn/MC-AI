@@ -437,6 +437,14 @@ export const TOOLS: ToolDef[] = [
     inputSchema: {},
   },
   {
+    name: "respawn",
+    method: "control.respawn",
+    title: "Respawn after death",
+    description: "Client-only. Activate the death screen's Respawn button (respawn at world spawn/bed).",
+    inputSchema: {},
+    annotations: WRITE,
+  },
+  {
     name: "start_using_item",
     method: "control.startUsing",
     title: "Start using held item",
@@ -452,15 +460,6 @@ export const TOOLS: ToolDef[] = [
   },
 
   // ===== interact (client) ===================================================================
-  {
-    name: "break_block",
-    method: "interact.breakBlock",
-    title: "Break a block",
-    description:
-      "Client-only. Break the block at a position. mode 'instant' uses creative-style instant break; 'survival' performs realistic timed mining (must be reachable, ~within 5 blocks).",
-    inputSchema: { ...vec3(), mode: z.enum(["instant", "survival"]).optional().default("survival") },
-    annotations: WRITE,
-  },
   {
     name: "place_block",
     method: "interact.placeBlock",
@@ -566,36 +565,6 @@ export const TOOLS: ToolDef[] = [
     annotations: READ,
   },
 
-  // ===== navigation (client, A*) =============================================================
-  {
-    name: "navigate_to",
-    method: "nav.pathTo",
-    title: "Navigate to a position",
-    description:
-      "Client-only. Asynchronously walk the player to a target position using A* pathfinding (handles walking, jumping up 1 block, and dropping down). Returns immediately; poll navigation_status to track progress and stop_navigation to cancel.",
-    inputSchema: {
-      ...vec3(),
-      reachRadius: z.number().min(0).max(16).optional().default(1).describe("Stop when within this many blocks of the target."),
-      sprint: z.boolean().optional().default(false),
-      timeoutSeconds: z.number().int().min(1).max(600).optional().default(60),
-    },
-  },
-  {
-    name: "navigation_status",
-    method: "nav.status",
-    title: "Navigation status",
-    description: "Client-only. Report whether navigation is active, the target, remaining distance/steps, and whether the bot appears stuck.",
-    inputSchema: {},
-    annotations: READ,
-  },
-  {
-    name: "stop_navigation",
-    method: "nav.stop",
-    title: "Stop navigation",
-    description: "Client-only. Cancel any active navigation and release movement.",
-    inputSchema: {},
-  },
-
   // ===== actions (client, blocking) ==========================================================
   {
     name: "move_to",
@@ -649,6 +618,20 @@ export const TOOLS: ToolDef[] = [
     title: "Cancel the current action",
     description: "Client-only. Cancel the running blocking action and release movement/mining.",
     inputSchema: {},
+    annotations: WRITE,
+  },
+
+  {
+    name: "mine_vein",
+    method: "action.mineVein",
+    title: "Mine a whole vein/tree (blocking)",
+    description:
+      "Client-only, BLOCKING. Mine a connected cluster of same-id blocks — a whole tree, an ore vein, a stack of logs. Walks between blocks as needed and follows the cluster to exhaustion (bounded by 'max'). One call = 'chop that tree down'.",
+    inputSchema: {
+      ...vec3(),
+      max: z.number().int().min(1).max(512).optional().default(64).describe("Maximum number of blocks to mine."),
+      timeoutSeconds: z.number().int().min(1).max(300).optional().default(60),
+    },
     annotations: WRITE,
   },
 

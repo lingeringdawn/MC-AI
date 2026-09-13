@@ -29,16 +29,28 @@ public final class AStarPathfinder {
 		return level.getBlockState(pos).getCollisionShape(level, pos).isEmpty();
 	}
 
-	private boolean hasGround(BlockPos pos) {
+	private boolean solid(BlockPos pos) {
 		return !passable(pos);
 	}
 
-	/** Can the bot's body occupy this position (feet here, head above, solid below)? */
-	private boolean canStand(BlockPos feet) {
-		return passable(feet) && passable(feet.above()) && hasGround(feet.below());
+	private boolean liquid(BlockPos pos) {
+		return !level.getBlockState(pos).getFluidState().isEmpty();
 	}
 
-	/** @return a path of block positions (excluding start, ending at/near goal), or null if none. */
+	/**
+	 * Can the bot's two-block body occupy this cell? True when standing on ground, treading water, or
+	 * swimming — so paths may cross ponds/rivers instead of refusing them.
+	 */
+	private boolean canOccupy(BlockPos feet) {
+		if (!passable(feet) || !passable(feet.above())) return false;
+		return solid(feet.below()) || liquid(feet) || liquid(feet.below());
+	}
+
+	/**
+	 * @return a non-empty path of block positions (excluding start, ending at/near goal), or null if
+	 * none. When the start already satisfies the reach a single-element path (the start) is returned,
+	 * so callers can tell "nothing to walk" apart from "no path".
+	 */
 	public List<BlockPos> findPath(BlockPos start, BlockPos goal, double reachRadius) {
 		Node startNode = new Node(start, 0, heuristic(start, goal), null);
 		PriorityQueue<Node> open = new PriorityQueue<>();
@@ -52,7 +64,9 @@ public final class AStarPathfinder {
 			expanded++;
 
 			if (withinReach(current.pos, goal, reachRadius)) {
-				return reconstruct(current);
+				List<BlockPos> path = reconstruct(current);
+				if (path.isEmpty()) path.add(start); // start already qualifies -> nothing to walk
+				return path;
 			}
 
 			for (Direction dir : Direction.Plane.HORIZONTAL) {
@@ -60,14 +74,15 @@ public final class AStarPathfinder {
 				BlockPos next = null;
 				double moveCost = 1.0;
 
-				if (canStand(h)) {
+				if (canOccupy(h)) {
 					next = h;
-				} else if (canStand(h.above()) && passable(current.pos.above().above())) {
-					next = h.above(); // step / jump up
+					if (liquid(h)) moveCost = 1.4; // wading / swimming is slower
+				} else if (canOccupy(h.above()) && passable(current.pos.above().above())) {
+					next = h.above(); // step / swim up
 					moveCost = 1.5;
 				} else {
 					for (int d = 1; d <= 3; d++) {
-						if (canStand(h.below(d))) {
+						if (canOccupy(h.below(d))) {
 							next = h.below(d);
 							moveCost = 1.0 + 0.3 * d;
 							break;
@@ -89,9 +104,11 @@ public final class AStarPathfinder {
 
 	private static boolean withinReach(BlockPos a, BlockPos goal, double reach) {
 		double dx = a.getX() - goal.getX();
-		double dy = a.getY() - goal.getY();
 		double dz = a.getZ() - goal.getZ();
-		return Math.sqrt(dx * dx + dy * dy + dz * dz) <= Math.max(0.75, reach);
+		double horiz = Math.sqrt(dx * dx + dz * dz);
+		double dy = Math.abs(a.getY() - goal.getY());
+		// Separate tolerances: a target Y is often just a guess, so allow vertical slack.
+		return horiz <= Math.max(0.9, reach) && dy <= Math.max(1.5, reach);
 	}
 
 	private static double heuristic(BlockPos a, BlockPos b) {

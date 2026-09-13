@@ -35,6 +35,12 @@ public final class ControlHandlers {
 			return Json.ok("jump");
 		});
 
+		router.register("control.respawn", ctx -> ClientMc.call(() -> {
+			LocalPlayer p = ClientMc.player();
+			p.respawn();
+			return Json.ok("respawned");
+		}));
+
 		router.register("control.look", ctx -> ClientMc.call(() -> {
 			LocalPlayer p = ClientMc.player();
 			float yaw = p.getYRot();

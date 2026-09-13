@@ -1,6 +1,7 @@
 package dev.mcpfabric.client;
 
 import com.google.gson.JsonObject;
+import dev.mcpfabric.client.nav.AStarPathfinder;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Options;
 import net.minecraft.client.multiplayer.MultiPlayerGameMode;
@@ -127,7 +128,7 @@ public final class BotController {
 
 		synchronized (this) {
 			if (path != null) {
-				steer(p);
+				steer(mc, p);
 			}
 			boolean driving = fwd || back || left || right || jumpHeld || sneak || sprint || jumpOnceTicks > 0 || path != null;
 			if (driving) {
@@ -180,13 +181,14 @@ public final class BotController {
 		gm.continueDestroyBlock(miningPos, miningFace);
 	}
 
-	private void steer(LocalPlayer p) {
+	private void steer(Minecraft mc, LocalPlayer p) {
 		if (System.currentTimeMillis() > navDeadline) {
 			stopNavigationInternal("timeout");
 			return;
 		}
 		Vec3 tgt = Vec3.atBottomCenterOf(navTarget);
-		if (p.position().distanceTo(tgt) <= Math.max(reachRadius, 0.6)) {
+		double dist = p.position().distanceTo(tgt);
+		if (dist <= Math.max(reachRadius, 0.6)) {
 			stopNavigationInternal("reached");
 			return;
 		}
@@ -196,10 +198,8 @@ public final class BotController {
 		}
 
 		BlockPos node = path.get(pathIndex);
-		double cx = node.getX() + 0.5;
-		double cz = node.getZ() + 0.5;
-		double dx = cx - p.getX();
-		double dz = cz - p.getZ();
+		double dx = node.getX() + 0.5 - p.getX();
+		double dz = node.getZ() + 0.5 - p.getZ();
 		double horiz = Math.sqrt(dx * dx + dz * dz);
 
 		float yaw = (float) (Mth.atan2(dz, dx) * (180.0 / Math.PI)) - 90.0F;
@@ -209,23 +209,46 @@ public final class BotController {
 
 		fwd = true;
 		back = left = right = false;
-		sprint = navSprint;
+		boolean inWater = p.isInWater();
+		sprint = navSprint && !inWater;
 
-		if (node.getY() > p.getY() + 0.4) {
+		if (inWater) {
+			// Swim: keep stroking forward and bob upward toward the next node.
+			jumpOnceTicks = Math.max(jumpOnceTicks, 1);
+		} else if (node.getY() > p.getY() + 0.4) {
 			jumpOnceTicks = Math.max(jumpOnceTicks, 1);
 		}
 		if (horiz < 0.55) {
 			pathIndex++;
 		}
 
-		double dist = p.position().distanceTo(tgt);
-		if (dist < lastDist - 0.01) {
+		// Stuck recovery ladder: hop -> re-plan -> give up.
+		if (dist < lastDist - 0.02) {
 			stuckTicks = 0;
 			lastDist = dist;
-		} else if (++stuckTicks > 60) {
-			stuckTicks = 0;
-			jumpOnceTicks = Math.max(jumpOnceTicks, 1);
+		} else {
+			stuckTicks++;
+			if (stuckTicks == 15 || stuckTicks == 30) {
+				jumpOnceTicks = Math.max(jumpOnceTicks, 2);
+			} else if (stuckTicks == 50) {
+				repath(mc, p);
+				stuckTicks = 0;
+				lastDist = Double.MAX_VALUE;
+			} else if (stuckTicks > 160) {
+				stopNavigationInternal("stuck");
+			}
 		}
+	}
+
+	/** Re-plan from the player's current position to the same target (returns true if a path was found). */
+	private boolean repath(Minecraft mc, LocalPlayer p) {
+		if (mc.level == null || navTarget == null) return false;
+		List<BlockPos> fresh = new AStarPathfinder(mc.level, 12000)
+				.findPath(p.blockPosition(), navTarget, Math.max(1.0, reachRadius));
+		if (fresh == null || fresh.isEmpty()) return false;
+		this.path = fresh;
+		this.pathIndex = 0;
+		return true;
 	}
 
 	private void stopNavigationInternal(String reason) {
