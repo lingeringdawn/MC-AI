@@ -7,13 +7,17 @@ import dev.mcpfabric.bridge.RpcContext;
 import dev.mcpfabric.bridge.RpcException;
 import dev.mcpfabric.bridge.RpcRouter;
 import dev.mcpfabric.client.ClientMc;
+import dev.mcpfabric.client.tasks.AttackTask;
 import dev.mcpfabric.client.tasks.ClientTask;
 import dev.mcpfabric.client.tasks.CollectItemsTask;
+import dev.mcpfabric.client.tasks.EatTask;
 import dev.mcpfabric.client.tasks.MineBlockTask;
 import dev.mcpfabric.client.tasks.MineVeinTask;
 import dev.mcpfabric.client.tasks.MoveToTask;
 import dev.mcpfabric.client.tasks.TaskManager;
 import net.minecraft.core.BlockPos;
+
+import java.util.UUID;
 
 /**
  * Goal-oriented, blocking actions. Unlike the atomic control/interact tools (which return the moment
@@ -41,6 +45,12 @@ public final class ActionHandlers {
 		router.register("action.collectItems", ctx -> run(ctx, ctx2 -> new CollectItemsTask(
 				ctx2.optDouble("radius", 16.0)), ctx.optInt("timeoutSeconds", 30)));
 
+		router.register("action.eat", ctx -> run(ctx, ctx2 -> new EatTask(), ctx.optInt("timeoutSeconds", 20)));
+
+		router.register("action.attack", ctx -> run(ctx, ctx2 -> new AttackTask(
+				uuid(ctx2, "uuid"), Math.max(0, ctx2.optInt("maxSwings", 0))),
+				ctx.optInt("timeoutSeconds", 30)));
+
 		router.register("action.status", ctx -> TaskManager.get().status());
 
 		router.register("action.cancel", ctx -> ClientMc.call(() -> {
@@ -65,6 +75,14 @@ public final class ActionHandlers {
 			return Json.ok("started");
 		});
 		return TaskManager.get().await(secs * 1000L + 2000L);
+	}
+
+	private static UUID uuid(RpcContext ctx, String key) throws RpcException {
+		try {
+			return UUID.fromString(ctx.getString(key));
+		} catch (IllegalArgumentException e) {
+			throw RpcException.badRequest("Invalid UUID: " + ctx.optString(key, ""));
+		}
 	}
 
 	private static void requireControl() throws RpcException {

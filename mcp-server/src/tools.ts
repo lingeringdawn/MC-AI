@@ -640,6 +640,31 @@ export const TOOLS: ToolDef[] = [
     annotations: WRITE,
   },
 
+  {
+    name: "eat",
+    method: "action.eat",
+    title: "Eat food until full (blocking)",
+    description:
+      "Client-only, BLOCKING. Hold the use key on the best food in the hotbar until the hunger bar is full (or no food is left). Uses the vanilla eating timing.",
+    inputSchema: {
+      timeoutSeconds: z.number().int().min(1).max(60).optional().default(20),
+    },
+    annotations: WRITE,
+  },
+  {
+    name: "attack",
+    method: "action.attack",
+    title: "Fight an entity (blocking)",
+    description:
+      "Client-only, BLOCKING. Walk into reach of an entity and hit it only when the attack cooldown is fully charged (no spam-clicking), swinging the arm. Ends when the target dies, maxSwings is reached, or it can't be reached.",
+    inputSchema: {
+      uuid: z.string().describe("Entity UUID to attack."),
+      maxSwings: z.number().int().min(0).max(500).optional().default(0).describe("Stop after this many hits (0 = until it dies)."),
+      timeoutSeconds: z.number().int().min(1).max(120).optional().default(30),
+    },
+    annotations: WRITE,
+  },
+
   // ===== ui (client, menus) ==================================================================
   {
     name: "menu_status",

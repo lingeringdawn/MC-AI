@@ -2,6 +2,7 @@ package dev.mcpfabric.client.nav;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.level.BlockGetter;
 
 import java.util.ArrayList;
@@ -10,6 +11,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
+import java.util.Set;
 
 /**
  * A small A* pathfinder over block positions for walking bots. Considers same-level walking,
@@ -37,12 +39,24 @@ public final class AStarPathfinder {
 		return !level.getBlockState(pos).getFluidState().isEmpty();
 	}
 
+	/** Blocks a real player would never walk into/onto. */
+	private static final Set<String> DANGEROUS = Set.of(
+			"minecraft:lava", "minecraft:fire", "minecraft:soul_fire", "minecraft:cactus",
+			"minecraft:magma_block", "minecraft:sweet_berry_bush", "minecraft:campfire",
+			"minecraft:soul_campfire", "minecraft:powder_snow");
+
+	private boolean dangerous(BlockPos pos) {
+		return DANGEROUS.contains(BuiltInRegistries.BLOCK.getKey(level.getBlockState(pos).getBlock()).toString());
+	}
+
 	/**
 	 * Can the bot's two-block body occupy this cell? True when standing on ground, treading water, or
-	 * swimming — so paths may cross ponds/rivers instead of refusing them.
+	 * swimming — so paths may cross ponds/rivers instead of refusing them. Hazardous cells are never
+	 * considered, so routes naturally go around lava/fire/cactus the way a cautious player would.
 	 */
 	private boolean canOccupy(BlockPos feet) {
 		if (!passable(feet) || !passable(feet.above())) return false;
+		if (dangerous(feet) || dangerous(feet.above()) || dangerous(feet.below())) return false;
 		return solid(feet.below()) || liquid(feet) || liquid(feet.below());
 	}
 
