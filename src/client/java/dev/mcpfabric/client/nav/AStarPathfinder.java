@@ -1,5 +1,7 @@
 package dev.mcpfabric.client.nav;
 
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -32,6 +34,10 @@ public final class AStarPathfinder {
 	}
 
 	private boolean passable(BlockPos pos) {
+		// A ladder or vine is climbed *through*, so it must never count as an obstacle. It does have a
+		// collision shape, which is why this check has to come first — otherwise the bot would refuse
+		// to step into the very column it is meant to climb.
+		if (isClimbable(level, pos)) return true;
 		return level.getBlockState(pos).getCollisionShape(level, pos).isEmpty();
 	}
 
@@ -48,6 +54,17 @@ public final class AStarPathfinder {
 			"minecraft:lava", "minecraft:fire", "minecraft:soul_fire", "minecraft:cactus",
 			"minecraft:magma_block", "minecraft:sweet_berry_bush", "minecraft:campfire",
 			"minecraft:soul_campfire", "minecraft:powder_snow");
+
+	/**
+	 * How far we are willing to jump right now. A three-block hop only works off a sprint, and vanilla
+	 * refuses to sprint at six food or less — so a starving player cannot clear it at all. Routing one
+	 * anyway would walk the bot straight into the hole, so the limit follows the appetite.
+	 */
+	private int maxJump() {
+		LocalPlayer p = Minecraft.getInstance().player;
+		boolean canSprint = p == null || p.getFoodData().getFoodLevel() > 6;
+		return canSprint ? MAX_JUMP : 2;
+	}
 
 	/** Blocks you can hold onto and climb, which a player uses as a vertical shortcut. */
 	private static final Set<String> CLIMBABLE = Set.of(
@@ -131,11 +148,14 @@ public final class AStarPathfinder {
 
 				// Sprint-jump across a gap. Without this the bot would refuse a route a person clears
 				// in one hop (a ravine, a stream, a hole), and would take a long way round instead.
-				for (int d = 2; d <= MAX_JUMP; d++) {
+				for (int d = 2; d <= maxJump(); d++) {
 					BlockPos landing = current.pos.relative(dir, d);
-					if (!canOccupy(landing)) break;
-					if (Math.abs(landing.getY() - current.pos.getY()) > 1) break;
-					if (!clearJumpArc(current.pos, landing, dir)) break;
+					// `continue`, never `break`: the cell two blocks out is usually still over the gap, and
+					// bailing out there would mean the three-block jump that does reach solid ground is
+					// never even considered.
+					if (!canOccupy(landing)) continue;
+					if (Math.abs(landing.getY() - current.pos.getY()) > 1) continue;
+					if (!clearJumpArc(current.pos, landing, dir)) continue;
 					consider(open, best, current, landing, 1.4 * d, goal);
 					break; // the shortest jump across is the one to take
 				}

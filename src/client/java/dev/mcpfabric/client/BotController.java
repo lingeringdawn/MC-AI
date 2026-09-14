@@ -8,6 +8,7 @@ import net.minecraft.client.Options;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.util.Mth;
 import net.minecraft.world.phys.Vec3;
 
@@ -193,6 +194,18 @@ public final class BotController {
 		this.lookRefreshedTick = -1000L;
 	}
 
+	/**
+	 * Point the view at an angle in this very tick, bypassing the interpolated turn. The eased flick is
+	 * right for normal aiming, but some things happen inside a single tick — emptying a water bucket
+	 * one tick before hitting the ground cannot wait four ticks for the crosshair to get there.
+	 */
+	public synchronized void snapLook(float yaw, float pitch) {
+		LocalPlayer p = Minecraft.getInstance().player;
+		if (p == null) return;
+		clearLookTarget();
+		applyLook(p, yaw, pitch);
+	}
+
 	/** Degrees left to turn toward the current target (0 when settled or idle). */
 	public synchronized float lookErrorDeg() {
 		LocalPlayer p = Minecraft.getInstance().player;
@@ -334,8 +347,9 @@ public final class BotController {
 			boolean driving = fwd || back || left || right || jumpHeld || sneak || sprint
 					|| jumpOnceTicks > 0 || attackHeld || useHeld || path != null;
 			// Nobody is steering or working: drift the view the way a person does instead of freezing
-			// the camera solid. Skipped the moment any owner wants the view.
-			if (!driving && !lookWanted) {
+			// the camera solid. Skipped the moment any owner wants the view, and never while the fall
+			// guard is holding the crosshair straight down.
+			if (!driving && !lookWanted && !saving) {
 				applyIdleSway(p);
 			} else {
 				idleTicks = 0;
@@ -471,7 +485,7 @@ public final class BotController {
 		// tick. When those two nodes lie in different directions the camera visibly trembles, and the
 		// walking direction flips with it. Once a node is behind us it stays behind us.
 		int idx = pathIndex;
-		while (idx < path.size() - 1 && horizOf(p, path.get(idx)) < NODE_ARRIVE_HORIZ) {
+		while (idx < path.size() - 1 && reachedNode(p, path.get(idx))) {
 			idx++;
 		}
 		pathIndex = idx;
@@ -505,8 +519,34 @@ public final class BotController {
 		}
 
 		boolean inWater = p.isInWater();
-		float yawErr = 180.0F;
+		ClientLevel level = mc.level;
+		if (level == null) {
+			stopNavigationInternal("no_world");
+			return;
+		}
+
+		double ux = 0.0;
+		double uz = 0.0;
 		if (horiz >= 0.05) {
+			ux = dx / horiz;
+			uz = dz / horiz;
+		}
+		BlockPos aheadFeet = BlockPos.containing(p.getX() + ux, p.getY(), p.getZ() + uz);
+		boolean onLadder = AStarPathfinder.isClimbable(level, p.blockPosition())
+				|| AStarPathfinder.isClimbable(level, aheadFeet);
+		// Only "climbing" while there is still height to gain. Once the path turns off the ladder at
+		// the top, the ordinary heading has to win, or the bot would hug the wall forever.
+		boolean climbing = onLadder && node.getY() > p.getY() + 0.3;
+
+		float yawErr = 180.0F;
+		Float climbYaw = climbing ? wallFacingYaw(level, p) : null;
+		if (climbYaw != null) {
+			// A ladder is climbed by facing the wall it hangs on and walking into it. Aiming at the path
+			// node instead points the bot *along* the wall, so "forward" walks it straight off the
+			// ladder — which is exactly what happened the first time this was tried.
+			yawErr = Math.abs(Mth.wrapDegrees(climbYaw - p.getYRot()));
+			lookAtTarget(climbYaw, p.getXRot(), LOOK_NAV);
+		} else if (horiz >= 0.05) {
 			float yaw = (float) (Mth.atan2(dz, dx) * (180.0 / Math.PI)) - 90.0F;
 			yawErr = Math.abs(Mth.wrapDegrees(yaw - p.getYRot()));
 			if (inWater) {
@@ -535,40 +575,42 @@ public final class BotController {
 		fwd = facing;
 		back = left = right = false;
 
-		ClientLevel level = mc.level;
-		if (level == null) {
-			stopNavigationInternal("no_world");
-			return;
-		}
-
-		double ux = 0.0;
-		double uz = 0.0;
-		if (horiz >= 0.05) {
-			ux = dx / horiz;
-			uz = dz / horiz;
-		}
-		BlockPos aheadFeet = BlockPos.containing(p.getX() + ux, p.getY(), p.getZ() + uz);
-		boolean climbing = AStarPathfinder.isClimbable(level, p.blockPosition())
-				|| AStarPathfinder.isClimbable(level, aheadFeet);
-
 		// Decide to hop *before* we arrive, and from a sprint. That is how a person clears a step or a
 		// gap without slowing down: the jump is pressed a little early so the sprint momentum is
 		// already there, rather than arriving, stopping, and hopping from a standstill. Jumping only
 		// from the ground and only when facing the way we are going keeps it from looking twitchy.
-		if (!inWater && !climbing && p.onGround() && facing) {
+		if (!inWater && !onLadder && p.onGround() && facing) {
 			BlockPos stepBlock = BlockPos.containing(p.getX() + ux * 1.1, p.getY(), p.getZ() + uz * 1.1);
 			BlockPos floorBlock = BlockPos.containing(p.getX() + ux * 1.1, p.getY() - 1.0, p.getZ() + uz * 1.1);
 			boolean stepUp = solid(level, stepBlock) && passable(level, stepBlock.above());
 			boolean holeAhead = passable(level, stepBlock) && !solid(level, floorBlock);
 			boolean nodeHigher = node.getY() > p.getY() + 0.5;
+
 			// A gap the path wants crossed: the landing node sits a couple of blocks away with nothing
 			// to walk on in between. Walking would drop us in, so this has to be a sprint-jump.
 			double nodeGap = horizOf(p, node);
-			boolean wideHop = holeAhead && nodeGap > 1.6 && nodeGap <= 4.2
+			// Only attempt a hop the current state can actually fly: three blocks needs a sprint, and a
+			// starving player cannot sprint at all.
+			boolean canSprint = p.getFoodData().getFoodLevel() > 6;
+			double maxHop = canSprint ? 4.2 : 2.4;
+			boolean gapRoute = holeAhead && nodeGap > 1.6 && nodeGap <= maxHop
 					&& Math.abs(node.getY() - p.getY()) <= 1.2;
-			if (stepUp || nodeHigher || wideHop) {
+			// Sprint while still approaching, so the run-up is already at speed by take-off.
+			if (gapRoute) sprint = true;
+
+			// A step-up is cleared by jumping slightly early (you need the height as you arrive), but a
+			// gap has to be jumped from the very lip: taking off a block early just loses a block of
+			// distance and lands in the hole, which is exactly what happened before.
+			BlockPos nearFeet = BlockPos.containing(p.getX() + ux * 0.6, p.getY(), p.getZ() + uz * 0.6);
+			BlockPos nearFloor = BlockPos.containing(p.getX() + ux * 0.6, p.getY() - 1.0, p.getZ() + uz * 0.6);
+			boolean atLip = passable(level, nearFeet) && !solid(level, nearFloor);
+
+			if (stepUp || nodeHigher) {
 				sprint = true;
 				jumpOnceTicks = Math.max(jumpOnceTicks, Humanizer.ticks(jumpRng, 4, 7));
+			} else if (gapRoute && atLip) {
+				// A full jump, held: a short tap would not carry far enough horizontally.
+				jumpOnceTicks = Math.max(jumpOnceTicks, Humanizer.ticks(jumpRng, 8, 11));
 			}
 		}
 
@@ -639,6 +681,34 @@ public final class BotController {
 			if (!solid(level, feet.below())) return false;
 		}
 		return true;
+	}
+
+	/**
+	 * Yaw that faces the wall a ladder or vine is attached to, or null when no side is solid. Climbing
+	 * is done by walking <em>into</em> that wall, so this is the heading that actually makes the bot
+	 * ascend instead of stepping sideways off the ladder.
+	 */
+	private static Float wallFacingYaw(ClientLevel level, LocalPlayer p) {
+		BlockPos base = p.blockPosition();
+		for (Direction d : Direction.Plane.HORIZONTAL) {
+			BlockPos side = base.relative(d);
+			if (!solid(level, side)) continue;
+			double dx = side.getX() + 0.5 - p.getX();
+			double dz = side.getZ() + 0.5 - p.getZ();
+			return (float) (Mth.atan2(dz, dx) * (180.0 / Math.PI)) - 90.0F;
+		}
+		return null;
+	}
+
+	/**
+	 * Has the player arrived at this path node? Both axes matter. A ladder column stacks all of its
+	 * nodes on one footprint, so a purely horizontal "have I arrived" test marks the whole climb as
+	 * reached the instant the bot touches the bottom rung — and then the follower aims at whatever the
+	 * path does next while still standing on the ground, which stalls the climb entirely.
+	 */
+	private static boolean reachedNode(LocalPlayer p, BlockPos node) {
+		double dy = node.getY() - p.getY();
+		return horizOf(p, node) < NODE_ARRIVE_HORIZ && dy < 1.5 && dy > -4.0;
 	}
 
 	/** Horizontal distance from the player to a block's centre. */

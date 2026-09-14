@@ -1,9 +1,13 @@
 package dev.mcpfabric.client;
 
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.util.Mth;
 import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.item.ItemStack;
 
 /**
@@ -24,10 +28,19 @@ final class FallGuard {
 
 	private static final String WATER_BUCKET = "minecraft:water_bucket";
 	private static final String BUCKET = "minecraft:bucket";
+	/**
+	 * Place the water only when the ground is this close. Reach is ~4.5 from the eye, and the eye sits
+	 * ~1.62 above the feet, so the feet have to be within ~2.8 for the ray to land on the ground.
+	 */
+	private static final double PLACE_REACH = 2.6;
+	/** How far down to look for something to land on. */
+	private static final int GROUND_SCAN = 8;
 
 	private Phase phase = Phase.IDLE;
 	private int timer;
 	private int savedSlot = -1;
+	/** True once the bucket has been emptied, so it is never emptied twice. */
+	private boolean placed;
 	/** Highest point of the current fall. Tracked here because the client's fallDistance is unreliable. */
 	private double peakY = Double.NaN;
 
@@ -66,15 +79,24 @@ final class FallGuard {
 		}
 
 		if (phase == Phase.PLACING) {
-			// Crosshair straight down, nobody else touching the movement keys, and empty the bucket.
-			bot.lookAtTarget(p.getYRot(), 90.0F, BotController.LOOK_USER);
+			// Snap the view straight down for real and empty the bucket. Both have to happen in this
+			// tick: the ground arrives within a tick or two of the water coming into range, so an
+			// interpolated turn (which is right for ordinary aiming) would still be half-way there.
+			bot.snapLook(p.getYRot(), 90.0F);
 			bot.setMovement(false, false, false, false, false, false, false);
 			bot.setAttackHeld(false);
-			bot.setUseHeld(timer < 3);
+			if (!placed) {
+				// Exactly one attempt: after it succeeds we are holding an empty bucket, and using that
+				// again would scoop the water straight back up.
+				if (mc.gameMode != null) {
+					mc.gameMode.useItem(p, InteractionHand.MAIN_HAND);
+					p.swing(InteractionHand.MAIN_HAND);
+				}
+				placed = true;
+			}
 			timer++;
 			// Done once we have stopped falling (landed, in the water, or caught by something).
 			if (p.onGround() || p.isInWater() || timer > 10) {
-				bot.setUseHeld(false);
 				phase = Phase.RECOVERING;
 				timer = 0;
 			}
@@ -111,6 +133,7 @@ final class FallGuard {
 		timer = 0;
 		peakY = Double.NaN;
 		savedSlot = -1;
+		placed = false;
 	}
 
 	private boolean needsSaving(LocalPlayer p) {
@@ -118,11 +141,40 @@ final class FallGuard {
 		if (p.onGround() || p.isInWater() || p.isFallFlying()) return false;
 		if (p.getAbilities().flying) return false;
 		if (Double.isNaN(peakY)) return false;
-		double drop = peakY - p.getY();
-		if (drop < 5.0) return false;
+
+		// Water can only be placed on a block we can actually reach, so the save has to wait until the
+		// ground is within placing range. Emptying the bucket while still high up would just fail: the
+		// ray from the eye never gets to the ground.
+		double groundDist = groundDistance(p);
+		if (groundDist <= 0.0 || groundDist > PLACE_REACH) return false;
+
+		// Now ask whether the whole fall — from the highest point down to that ground — would hurt.
+		double landingFeetY = p.getY() - groundDist;
+		double totalDrop = peakY - landingFeetY;
+		if (totalDrop < 5.0) return false;
 		// Vanilla fall damage is (distance - 3), so only bother when that would genuinely hurt.
-		float predicted = (float) (drop - 3.0);
+		float predicted = (float) (totalDrop - 3.0);
 		return predicted >= Math.max(4.0F, p.getHealth() - 2.0F);
+	}
+
+	/**
+	 * Distance from the player's feet down to the first block we could land on, or -1 when there is
+	 * nothing solid within scan range. Measured from the feet, so 0 means standing on it.
+	 */
+	private static double groundDistance(LocalPlayer p) {
+		ClientLevel level = Minecraft.getInstance().level;
+		if (level == null) return -1.0;
+		int feetY = Mth.floor(p.getY());
+		int x = Mth.floor(p.getX());
+		int z = Mth.floor(p.getZ());
+		for (int dy = 0; dy <= GROUND_SCAN; dy++) {
+			BlockPos pos = new BlockPos(x, feetY - dy, z);
+			if (!level.getBlockState(pos).getCollisionShape(level, pos).isEmpty()) {
+				double top = (feetY - dy) + 1.0;
+				return p.getY() - top;
+			}
+		}
+		return -1.0;
 	}
 
 	private static int findHotbar(LocalPlayer p, String itemId) {
