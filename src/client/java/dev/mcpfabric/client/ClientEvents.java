@@ -1,6 +1,7 @@
 package dev.mcpfabric.client;
 
 import com.google.gson.JsonObject;
+import dev.mcpfabric.client.tasks.EventFeed;
 import dev.mcpfabric.events.EventBus;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.minecraft.client.Minecraft;
@@ -28,6 +29,9 @@ public final class ClientEvents {
 
 	public static void register(EventBus events) {
 		bus = events;
+		// The wake-up stream rides the same bus, so a driver can either subscribe to /events or block in
+		// watch.wait — same transitions either way.
+		EventFeed.bind(events);
 
 		ClientReceiveMessageEvents.GAME.register((message, overlay) -> {
 			JsonObject d = new JsonObject();

@@ -353,13 +353,21 @@ public final class TaskObserver {
 		for (String id : raw) {
 			if (knownAnomalies.contains(id)) continue;
 			JsonObject a = found.getAsJsonObject(id);
+			int severity = a.get("severity").getAsInt();
 			note("anomaly: " + id + " (" + a.get("evidence").getAsString() + ")");
-			// This is the moment the clock starts for the caller's reaction time: the instant the problem
-			// became visible, not the instant it began. Whether an answer follows is measured in Latency.
-			if (a.get("severity").getAsInt() >= 1) Latency.sighted(id + ": " + a.get("evidence").getAsString());
+			// A transition, and therefore a candidate wake-up: something started. Recorded with its own
+			// severity so a driver can filter to what it cares about; whether it is worth a turn is the
+			// driver's call, not this class's.
+			Watch.record("anomaly", id + ": " + a.get("evidence").getAsString(), null, severity);
+			// This is also the moment the clock starts for the caller's reaction time: the instant the
+			// problem became visible, not the instant it began.
+			if (severity >= 1) Latency.sighted(id + ": " + a.get("evidence").getAsString());
 		}
 		for (String id : knownAnomalies) {
-			if (!raw.contains(id)) note("cleared: " + id);
+			if (!raw.contains(id)) {
+				note("cleared: " + id);
+				Watch.record("anomaly", "cleared: " + id, null, 1);
+			}
 		}
 		knownAnomalies = raw;
 
@@ -644,6 +652,8 @@ public final class TaskObserver {
 	 */
 	public void record(String kind, String text) {
 		event(kind, text);
+		// Also onto the wake-up stream: a rule firing is one of the moments a driver may want a turn for.
+		Watch.record(kind, text, null, 1);
 	}
 
 	/** Record a change with its own sequence number. */

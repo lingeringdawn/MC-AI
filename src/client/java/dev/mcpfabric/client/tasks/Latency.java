@@ -53,6 +53,7 @@ public final class Latency {
 		sightedAtMs = System.currentTimeMillis();
 		sightedWhat = what == null ? "" : what;
 		incidentsTotal++;
+		Watch.record("incident", "opened: " + sightedWhat, null, 2);
 	}
 
 	/** A call arrived. Reads mark the clock; state-changing calls answer whatever was open. */
@@ -71,6 +72,7 @@ public final class Latency {
 			long ms = now - sightedAtMs;
 			push(INCIDENTS, ms);
 			worstIncidentMs = Math.max(worstIncidentMs, ms);
+			Watch.record("incident", "answered after " + ms + "ms: " + sightedWhat, null, 1);
 			sightedAtMs = -1L;
 			sightedWhat = "";
 		}
@@ -83,13 +85,18 @@ public final class Latency {
 	 */
 	public static synchronized JsonObject snapshot() {
 		JsonObject o = new JsonObject();
+		long now = System.currentTimeMillis();
 		if (sightedAtMs > 0L) {
 			o.addProperty("openIncident", sightedWhat);
-			o.addProperty("openForMs", System.currentTimeMillis() - sightedAtMs);
+			o.addProperty("openForMs", now - sightedAtMs);
 		}
 		o.addProperty("incidentsAnswered", incidentsTotal - (sightedAtMs > 0L ? 1 : 0));
 		o.addProperty("incidentMedianMs", median(INCIDENTS));
 		o.addProperty("loopMedianMs", median(LOOPS));
+		// The two windows above only ever measure between calls, which flatters them: the time a caller
+		// spends thinking and writing is invisible to them. These two do not care where the gap is.
+		if (lastActionAtMs > 0L) o.addProperty("sinceLastActionMs", now - lastActionAtMs);
+		if (lastReadAtMs > 0L) o.addProperty("sinceLastReadMs", now - lastReadAtMs);
 		return o;
 	}
 

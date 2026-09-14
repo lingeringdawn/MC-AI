@@ -24,6 +24,7 @@ import dev.mcpfabric.client.tasks.Rules;
 import dev.mcpfabric.client.tasks.TaskManager;
 import dev.mcpfabric.client.tasks.TaskModules;
 import dev.mcpfabric.client.tasks.UseForTask;
+import dev.mcpfabric.client.tasks.Watch;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.item.Item;
 
@@ -66,6 +67,7 @@ public final class ActionHandlers {
 		registerPlan(router);
 		registerParkedPlan(router);
 		registerMemory(router);
+		registerWatch(router);
 
 		// One hook on the dispatcher times how long the caller takes to answer what it was shown. No
 		// per-call instrumentation, and nothing in it decides anything.
@@ -120,6 +122,56 @@ public final class ActionHandlers {
 		router.register("action.do", ctx -> run(ctx,
 				ctx2 -> plan(router, ctx2.params()),
 				ctx.optInt("timeoutSeconds", 120)));
+	}
+
+	/**
+	 * The wake-up primitive: a driver blocks here and gets a turn the moment something happens.
+	 *
+	 * <p>MCP is a pull channel — a model that is not generating a call is not watching anything — so the
+	 * wake-up has to live in whatever drives the caller. What that driver needs is not another endpoint to
+	 * poll (polling is how a turn arrives late) but one it can block on, which is what {@code watch.wait}
+	 * is. Everything that matters is recorded as a <em>transition</em>: a level is not a reason to wake
+	 * anybody, but "health fell 18 → 4" and "the task you asked for settled" are.
+	 *
+	 * <p>{@code watch.wait} runs on the calling worker thread, deliberately not on the game thread: it
+	 * waits for the world to do something, and doing that from the tick would stall the very game it is
+	 * waiting on.
+	 */
+	private static void registerWatch(RpcRouter router) {
+		router.register("watch.pending", ctx -> Watch.pending(
+				longParam(ctx, "sinceSeq", 0L),
+				kinds(ctx),
+				intParam(ctx, "minSeverity", 0),
+				intParam(ctx, "limit", 50)));
+
+		// Default sinceSeq is "now", which is what a driver wants: wait for the NEXT thing, not for
+		// everything that has ever happened.
+		router.register("watch.wait", ctx -> Watch.await(
+				longParam(ctx, "sinceSeq", Watch.seq()),
+				longParam(ctx, "timeoutMs", 30_000L),
+				kinds(ctx),
+				intParam(ctx, "minSeverity", 0)));
+
+		router.register("watch.status", ctx -> Watch.status());
+	}
+
+	private static String[] kinds(RpcContext ctx) {
+		JsonObject p = ctx.params();
+		if (!p.has("kinds") || !p.get("kinds").isJsonArray()) return null;
+		JsonArray arr = p.getAsJsonArray("kinds");
+		String[] out = new String[arr.size()];
+		for (int i = 0; i < arr.size(); i++) out[i] = arr.get(i).getAsString();
+		return out;
+	}
+
+	private static long longParam(RpcContext ctx, String key, long fallback) {
+		JsonObject p = ctx.params();
+		return p.has(key) && p.get(key).isJsonPrimitive() ? p.get(key).getAsLong() : fallback;
+	}
+
+	private static int intParam(RpcContext ctx, String key, int fallback) {
+		JsonObject p = ctx.params();
+		return p.has(key) && p.get(key).isJsonPrimitive() ? p.get(key).getAsInt() : fallback;
 	}
 
 	/**
@@ -279,6 +331,15 @@ public final class ActionHandlers {
 				+ "what should not be worked out again. 'writes' counts revisions — a lesson revised five times "
 				+ "is still not right. A 'procedure' whose steps pin x/y/z comes back with a warning, because "
 				+ "symbolic targets (visible_log, nearest_drop, looking_at) keep it working when the world moves.");
+		o.addProperty("wakeUp", "watch.wait {sinceSeq, timeoutMs, kinds?, minSeverity?} BLOCKS until a "
+				+ "transition lands, then returns it — this is how a driver wakes you instead of polling: "
+				+ "block, get a turn, read what you need in ONE batched call (action.status + "
+				+ "action.observe{sinceSeq} + latency.stats), decide, act, block again. watch.pending reads "
+				+ "what already happened; watch.status shows the kinds. Transitions are things starting or "
+				+ "stopping — anomaly appeared/cleared (with its severity), task started/settled/cancelled, "
+				+ "plan parked, rule fired, incident opened/answered. The same transitions go out on the SSE "
+				+ "stream (/events) as 'watch' events for a driver that would rather subscribe. What matters "
+				+ "is still your call: the mod reports, and filters are yours.");
 		o.addProperty("fluency", "observe.now.latency, and latency.stats, is the reaction reading: 'incident' "
 				+ "is the time from an anomaly being reported to the first action submitted afterwards, 'loop' "
 				+ "is from a read to the next action, both as medians over the last 20. Reading is not "

@@ -29,6 +29,8 @@ public final class TaskManager {
 	private TaskManager() {}
 
 	private volatile ClientTask current;
+	/** The last task whose start/settle has been put on the wake-up stream, so it is announced once. */
+	private ClientTask announced;
 	private final TaskObserver observer = new TaskObserver();
 
 	/**
@@ -59,13 +61,16 @@ public final class TaskManager {
 			if (snap != null) {
 				ParkedPlan.put(snap, task.describe(), superseded);
 				parked = superseded;
+				Watch.record("plan", "parked at its current step: " + superseded, null, 1);
 			}
 			observer.note("superseded " + superseded + (parked != null ? " (parked at its current step)" : ""));
 		}
 		current = task;
+		announced = task;
 		observer.begin(task);
 		task.onStart(mc);
 		observer.sample(mc, task);
+		Watch.record("task", "started: " + task.describe(), null, 1);
 
 		JsonObject o = new JsonObject();
 		o.addProperty("state", "running");
@@ -107,6 +112,16 @@ public final class TaskManager {
 		// surface" has to be able to overrule whatever the task is doing, or it is not a reflex.
 		Rules.get().tick(mc, observer);
 		ClientTask t = current;
+		// A task finishing is a transition, and often the one a driver has been waiting for: the thing it
+		// asked for is done (or has failed), and there is something to decide. Recorded once, on the tick
+		// it settles, rather than being polled for.
+		if (t != null && t.isDone() && t != announced) {
+			announced = t;
+			JsonObject settled = t.result();
+			String detail = settled != null && settled.has("detail") ? settled.get("detail").getAsString() : "";
+			Watch.record("task", "settled: " + t.describe() + (detail.isEmpty() ? "" : " — " + detail),
+					settled, 1);
+		}
 		if (t == null) {
 			// Keep sampling even between tasks so an idle player is still observable.
 			observer.sampleIdle(mc);
@@ -170,7 +185,11 @@ public final class TaskManager {
 			// best effort
 		}
 		t.stampCancelled("cancelled on request");
-		if (snap != null) ParkedPlan.put(snap, "action.cancel", t.describe());
+		if (snap != null) {
+			ParkedPlan.put(snap, "action.cancel", t.describe());
+			Watch.record("plan", "parked on cancel: " + t.describe(), null, 1);
+		}
+		Watch.record("task", "cancelled: " + t.describe(), null, 1);
 		observer.note("cancelled " + t.describe() + (snap != null ? " (parked at its current step)" : ""));
 	}
 

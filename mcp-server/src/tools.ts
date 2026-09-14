@@ -1120,6 +1120,60 @@ export const TOOLS: ToolDef[] = [
     annotations: READ,
   },
   {
+    name: "watch_wait",
+    method: "watch.wait",
+    title: "Block until something happens (the wake-up)",
+    description:
+      "Client-only. THE WAKE-UP PRIMITIVE, and the answer to \"the bot did nothing for thirty seconds\": " +
+      "it does not return until a transition lands, so a driver (your host, a scheduler, a loop you run) " +
+      "can block here and get a turn the moment something happens instead of polling and arriving late. " +
+      "The mod cannot wake you — a model that is not generating a call is not watching anything — so this " +
+      "is the piece that belongs on the driving side.\n" +
+      "`sinceSeq` defaults to now, i.e. wait for the NEXT thing. `kinds` filters (anomaly / task / rule / " +
+      "incident / plan), `minSeverity` filters within that (anomaly severity 0-2; ordinary transitions are " +
+      "1, an incident opening is 2). Returns {wake, transitions[], waitedMs} — and `wake:false` on a quiet " +
+      "timeout is information too: the world really was quiet.\n" +
+      "The loop it is meant for: block here → read what you need in ONE batched call (action_status + " +
+      "observe{sinceSeq} + latency_stats) → decide → act → block again. Whether a given transition " +
+      "deserves a turn is your judgement; the mod only reports.",
+    inputSchema: {
+      sinceSeq: z.number().int().min(0).optional().describe("Highest seq you have seen. Default: now."),
+      timeoutMs: z.number().int().min(0).max(120000).optional().default(30000).describe("Give up after this. Capped at 120000."),
+      kinds: z
+        .array(z.enum(["anomaly", "task", "rule", "incident", "plan"]))
+        .optional()
+        .describe("Only these kinds. Omit for anything."),
+      minSeverity: z.number().int().min(0).max(2).optional().default(0).describe("2 = only urgent things."),
+    },
+    annotations: READ,
+  },
+  {
+    name: "watch_pending",
+    method: "watch.pending",
+    title: "What has happened since I last looked",
+    description:
+      "Client-only, READ-ONLY. The transitions after `sinceSeq`, oldest first — the same log watch_wait " +
+      "blocks on, read without blocking. Use it to catch up on a gap without waiting for the next thing. " +
+      "Each entry carries seq, agoMs, kind, text and severity.",
+    inputSchema: {
+      sinceSeq: z.number().int().min(0).optional().default(0),
+      kinds: z.array(z.enum(["anomaly", "task", "rule", "incident", "plan"])).optional(),
+      minSeverity: z.number().int().min(0).max(2).optional().default(0),
+      limit: z.number().int().min(1).max(200).optional().default(50),
+    },
+    annotations: READ,
+  },
+  {
+    name: "watch_status",
+    method: "watch.status",
+    title: "How far the transition log has got",
+    description:
+      "Client-only, READ-ONLY. The current seq, the capacity of the buffer, and the kinds of the most " +
+      "recent transitions. Cheap way to see whether anything is moving at all before deciding to block.",
+    inputSchema: {},
+    annotations: READ,
+  },
+  {
     name: "observe",
     method: "action.observe",
     title: "Observe the world right now",
