@@ -696,7 +696,10 @@ export const TOOLS: ToolDef[] = [
       "Client-only, READ-ONLY. A live situational snapshot, sampled every tick: your vitals (health/food/air/position), " +
       "nearby hostile mobs with distance, dropped items on the ground, what the crosshair is on, whether a blocking " +
       "action is running and what it is doing, and a rolling log of notable moments. Use it to look before you act, or " +
-      'to keep watching while another call is in flight; "observe.danger" is 0 (fine) / 1 (caution) / 2 (act now). ' +
+      'to keep watching while another call is in flight; "observe.danger" is 0 (fine) / 1 (caution) / 2 (act now), ' +
+      "and dangerReason names the cause (low_health / drowning air=N / hostile_close / dead). " +
+      "This is the ONLY source of awareness: the mod never acts on its own — it will not surface, fight, retreat or " +
+      "save itself unless you call for it — so read this, then issue the short action you want. " +
       "Works whether idle or mid-action.",
     inputSchema: {},
     annotations: READ,
@@ -786,6 +789,63 @@ export const TOOLS: ToolDef[] = [
       uuid: z.string().describe("Entity UUID to hit."),
       swings: z.number().int().min(0).max(64).optional().default(1).describe("Stop after this many landed hits (0 = keep swinging for the whole step budget)."),
       timeoutSeconds: z.number().int().min(1).max(60).optional().default(10),
+      waitSeconds: waitSeconds(60),
+    },
+    annotations: WRITE,
+  },
+  {
+    name: "retreat_from",
+    method: "action.retreat",
+    title: "Back away from something (blocking, short)",
+    description:
+      "Client-only, BLOCKING. Withdraw roughly 'distance' blocks, on the far side of the player from the " +
+      "given entity or coordinate, then stop. Picks shelter that is walkable — it will not back into " +
+      "water or off a ledge — and re-aims around the arc when the way straight back is blocked. " +
+      "Returns state 'withdrew' / 'no_threat' (the thing is gone) / 'no_room' / 'no_path' / 'timeout'. " +
+      "Nothing retreats on its own: watch health and nearby hostiles in the observation feed and decide." +
+      OBSERVE_NOTE,
+    inputSchema: {
+      uuid: z.string().optional().describe("Entity to back away from. Give this or x/y/z."),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      z: z.number().optional(),
+      distance: z.number().min(1.5).max(64).optional().default(6).describe("How far away to end up."),
+      timeoutSeconds: z.number().int().min(1).max(120).optional().default(20),
+      waitSeconds: waitSeconds(120),
+    },
+    annotations: WRITE,
+  },
+  {
+    name: "surface",
+    method: "action.surface",
+    title: "Swim up for air (blocking, short)",
+    description:
+      "Client-only, BLOCKING. Swim straight up until the head is out of the water and the air bar has " +
+      "refilled, then return. No walking, no sprinting, so it rises instead of drifting sideways. " +
+      "Returns state 'surfaced' / 'not_in_water' / 'timeout'. " +
+      "There is deliberately no drowning reflex in the mod — observe publishes 'air' and " +
+      "'eyesUnderWater', and dangerReason says 'drowning air=N — action_surface' when it is time." +
+      OBSERVE_NOTE,
+    inputSchema: {
+      timeoutSeconds: z.number().int().min(1).max(120).optional().default(20),
+      waitSeconds: waitSeconds(120),
+    },
+    annotations: WRITE,
+  },
+  {
+    name: "water_bucket_save",
+    method: "action.mlg",
+    title: "Water-bucket fall save (blocking, short)",
+    description:
+      "Client-only, BLOCKING. The 'MLG water' save, on demand: waits until the ground is inside placing " +
+      "range, empties a water bucket straight down, lands in it, then scoops the source back up and " +
+      "restores the hotbar slot. Needs a water_bucket in the hotbar. " +
+      "Returns state 'saved' / 'nothing_to_save' (already on the ground) / 'no_water_bucket' / " +
+      "'never_in_reach' (not actually falling). Nothing fires this automatically — call it from a fall " +
+      "you chose to take, before you are too close to the ground to place the water." +
+      OBSERVE_NOTE,
+    inputSchema: {
+      timeoutSeconds: z.number().int().min(1).max(60).optional().default(20),
       waitSeconds: waitSeconds(60),
     },
     annotations: WRITE,

@@ -16,6 +16,7 @@ import dev.mcpfabric.client.handlers.LocalPlayerHandlers;
 import dev.mcpfabric.client.handlers.NavHandlers;
 import dev.mcpfabric.client.handlers.UiHandlers;
 import dev.mcpfabric.client.handlers.VisionHandlers;
+import dev.mcpfabric.client.tasks.AnomalyResponder;
 import dev.mcpfabric.client.tasks.TaskManager;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -74,13 +75,12 @@ public class McpFabricClient implements ClientModInitializer {
 		});
 		ClientTickEvents.END_CLIENT_TICK.register(client -> BotController.get().onClientTick(client));
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
+			// The only thing driven from the tick is the task the AI asked for, plus the read-only
+			// sampling that feeds the observation. The responder is the single exception, and only
+			// when the config explicitly asks for it.
 			TaskManager.get().setWatching(McpFabric.config().enableTaskObservation);
-			TaskManager.get().setAbortOnDanger(McpFabric.config().abortTaskOnDanger);
-			ThreatGuard.get().setEnabled(McpFabric.config().enableSelfDefense);
 			TaskManager.get().tick(client);
-			// Deliberately after the task: self-defence gets the final say on the inputs, so a task
-			// cannot keep walking the bot away from a mob that is eating it.
-			ThreatGuard.get().tick(client);
+			AnomalyResponder.get().tick(client, McpFabric.config().autoHandleAnomalies);
 		});
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
 			// Keep the event ring buffer's tick stamp in step with the client's own world clock.

@@ -41,22 +41,10 @@ public final class McpConfig {
 	public boolean enableVision = true;
 	/**
 	 * Make the bot's input read as human rather than mechanical: eased mouse-look (fast flick, soft
-	 * settle) instead of constant-rate turning, a short reaction delay before acting, circle-strafing
-	 * and spacing in combat, and a slow gaze drift while standing still. Turn off for deterministic,
-	 * machine-precise motion.
+	 * settle) instead of constant-rate turning, a short reaction delay before acting, and
+	 * circle-strafing and spacing in combat. Turn off for deterministic, machine-precise motion.
 	 */
 	public boolean enableHumanization = true;
-	/**
-	 * Fight back (or back off when badly hurt) when a hostile mob attacks while a task is running.
-	 * Without this the bot walks straight past a zombie and is beaten to death mid-job.
-	 */
-	public boolean enableSelfDefense = true;
-	/**
-	 * Let the bot save itself from a lethal fall by emptying a water bucket underneath it (the classic
-	 * "MLG water"), then scoop the water back up. Only fires when the drop would genuinely hurt, and
-	 * only when a water bucket is in the hotbar.
-	 */
-	public boolean enableFallSaving = true;
 	/**
 	 * FOR TESTING ONLY. Allow the {@code cheat.*} group to issue vanilla commands as the local player
 	 * — give yourself a pickaxe, summon the mob you want to train against, force night, build a test
@@ -67,14 +55,17 @@ public final class McpConfig {
 
 	/**
 	 * Sample the world every tick while a blocking action runs, so callers can see health, nearby
-	 * hostiles, drops and task progress instead of staring at an opaque in-flight call.
+	 * hostiles, drops and task progress instead of staring at an opaque in-flight call. Read-only: it
+	 * decides nothing, it only tells the caller what is going on.
 	 */
 	public boolean enableTaskObservation = true;
 	/**
-	 * When observing, abort a running action as soon as the situation becomes critical (about to die,
-	 * or a hostile mob inside melee range). Off by default: aborting is a judgement call.
+	 * Opt-in: act on the worst anomaly the observation reports — surface, water-bucket a lethal fall,
+	 * eat when starving, withdraw from a mob — instead of only naming it and leaving the caller to
+	 * respond. Off by default, so the mod reports rather than acts; even when on it never interrupts a
+	 * task the caller asked for, and only fires in the gaps between actions.
 	 */
-	public boolean abortTaskOnDanger = false;
+	public boolean autoHandleAnomalies = false;
 
 	public transient Path source;
 

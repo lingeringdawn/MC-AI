@@ -82,14 +82,9 @@ public final class TaskManager {
 				McpFabric.LOGGER.warn("[mcpfabric] observer sample failed", e);
 			}
 		}
-		if (abortOnDanger && !t.isDone() && observer.danger() >= 2) {
-			t.fail("aborted: " + observer.dangerReason());
-			observer.note("aborted — " + observer.dangerReason());
-		}
 	}
 
 	private volatile boolean watching = true;
-	private volatile boolean abortOnDanger;
 
 	/** Turn per-tick world sampling on/off (config). */
 	public void setWatching(boolean on) {
@@ -97,18 +92,10 @@ public final class TaskManager {
 		observer.setEnabled(on);
 	}
 
-	/** Turn automatic task abort on extreme danger on/off (config). */
-	public void setAbortOnDanger(boolean on) {
-		this.abortOnDanger = on;
-	}
-
 	public boolean watching() {
 		return watching;
 	}
 
-	public boolean abortOnDanger() {
-		return abortOnDanger;
-	}
 
 	/**
 	 * Block the calling (worker) thread until the active task settles or {@code waitMs} elapses.

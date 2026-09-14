@@ -1,7 +1,5 @@
 package dev.mcpfabric.client.tasks;
 
-import dev.mcpfabric.client.ThreatGuard;
-
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import dev.mcpfabric.client.BotController;
@@ -23,7 +21,9 @@ import net.minecraft.world.phys.Vec3;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Live situational awareness for a running task: sampled every client tick, so a caller that is
@@ -46,6 +46,16 @@ public final class TaskObserver {
 	private static final double DROP_RADIUS = 12.0;
 	/** Health at/below this fraction of max raises the danger level. */
 	private static final float LOW_HEALTH_FRACTION = 0.35F;
+	/**
+	 * Air at/below this is reported as an emergency. It is the caller's cue to ask for
+	 * {@code action.surface}: the mod deliberately has no drowning reflex of its own, so the only thing
+	 * standing between the bot and a lungful of water is the caller noticing this number.
+	 */
+	private static final int AIR_ALERT = 120;
+	/** Fall distance already accumulated that is enough to hurt: 4 blocks is 1 damage, and rising. */
+	private static final double HARMFUL_FALL = 4.0;
+	/** A walk that has made no progress for this many ticks is wedged, not walking. */
+	private static final int STUCK_TICKS = 25;
 
 	private final Deque<JsonObject> log = new ArrayDeque<>();
 	private final List<String> logKeys = new ArrayList<>();
@@ -66,6 +76,25 @@ public final class TaskObserver {
 	private int dropCount;
 	private float health = 20.0F;
 	private float maxHealth = 20.0F;
+	/** Air left in the current lungful; the caller's cue to ask for {@code action.surface}. */
+	private int air = 300;
+
+	// --- anomaly detection: what is wrong with the player right now --------------------------
+	/** Health at the previous sample, so a hit is visible as a delta rather than only as a value. */
+	private float prevHealth = 20.0F;
+	private int prevFood = 20;
+	/** Where the player was the last time they actually moved, to spot being wedged. */
+	private double lastMoveX = Double.NaN;
+	private double lastMoveZ = Double.NaN;
+	private int stillTicks;
+	private boolean moving;
+	/** Anomalies found this tick, keyed by id; each carries severity, evidence and a remedy. */
+	private JsonObject anomalies = new JsonObject();
+	/** The worst one this tick, or null. */
+	private JsonObject worst;
+	private String worstId = "";
+	/** Ids seen last tick, used to log appearance and clearing rather than repeating every tick. */
+	private Set<String> knownAnomalies = new LinkedHashSet<>();
 
 	/** Begin observing a task; resets the log and the sample baseline. */
 	public void begin(ClientTask task) {
@@ -117,10 +146,12 @@ public final class TaskObserver {
 		// --- vitals ---------------------------------------------------------
 		health = p.getHealth();
 		maxHealth = p.getMaxHealth();
+		air = p.getAirSupply();
 		o.addProperty("health", health);
 		o.addProperty("maxHealth", maxHealth);
 		o.addProperty("food", p.getFoodData().getFoodLevel());
-		o.addProperty("air", p.getAirSupply());
+		o.addProperty("air", air);
+		o.addProperty("eyesUnderWater", p.isUnderWater());
 		o.addProperty("onGround", p.onGround());
 		o.addProperty("inWater", p.isInWater());
 		o.addProperty("dead", p.isDeadOrDying() || p.getHealth() <= 0.0F);
@@ -142,12 +173,11 @@ public final class TaskObserver {
 		// --- drops on the ground --------------------------------------------
 		sampleDrops(p, level, o);
 
+		// --- abnormal player states, live, each with the module that fixes it -------------------
+		sampleAnomalies(p, level, o);
+
 		// --- the task's own progress ----------------------------------------
 		if (taskProgress != null && taskProgress.size() > 0) o.add("progress", taskProgress);
-
-		// --- self-defence state: who the bot is fighting and whether it is actually aimed ----------
-		JsonObject guard = ThreatGuard.get().snapshot();
-		if (guard.has("engaged") && guard.get("engaged").getAsBoolean()) o.add("guard", guard);
 
 		// --- navigation state (shared by every walking task) ------------------
 		JsonObject nav = BotController.get().statusJson();
@@ -155,6 +185,138 @@ public final class TaskObserver {
 
 		snapshot = o;
 		raiseAlerts(p);
+	}
+
+	/**
+	 * Read the player's condition every tick and report anything abnormal, with the evidence and the
+	 * module that fixes it.
+	 *
+	 * <p>This is the part a health bar alone hides: drowning with air quietly ticking down, a fall
+	 * already long enough to hurt, being on fire, freezing, wedged while a walk is running, being
+	 * carried along by water you placed yourself. Every entry carries a {@code remedy} naming the
+	 * action to call, so handling it is a lookup rather than a guess — and the set is diffed against
+	 * last tick, so the log shows a problem appearing and clearing instead of repeating every tick.
+	 */
+	private void sampleAnomalies(LocalPlayer p, ClientLevel level, JsonObject now) {
+		JsonObject found = new JsonObject();
+		worst = null;
+		float h = p.getHealth();
+		int food = p.getFoodData().getFoodLevel();
+
+		if (h <= 0.0F) {
+			add(found, "dead", 2, "action_cancel", "health=0", null);
+		} else if (maxHealth > 0.0F && h <= maxHealth * LOW_HEALTH_FRACTION) {
+			JsonObject threat = firstThreat(now);
+			add(found, "low_health", 2, threat != null ? "retreat_from" : null,
+					"health=" + Math.round(h) + "/" + Math.round(maxHealth),
+					threat != null && threat.has("pos") ? threat.getAsJsonObject("pos") : null);
+		}
+
+		float lost = prevHealth - h;
+		if (h > 0.0F && lost >= 0.5F) {
+			add(found, "taking_damage", lost >= 4.0F ? 2 : 1, null,
+					"lost " + round(lost) + " health since the last sample", null);
+		}
+
+		if (p.isUnderWater() && air < 240) {
+			add(found, "drowning", 2, "surface", "air=" + air + ", eyes under water", null);
+		}
+
+		if (!p.onGround() && !p.isInWater() && !p.getAbilities().flying && !p.isFallFlying()) {
+			double speed = Math.abs(p.getDeltaMovement().y);
+			if (p.fallDistance >= HARMFUL_FALL) {
+				add(found, "falling_hard", 2, "water_bucket_save",
+						"fallen " + round(p.fallDistance) + " blocks at " + round(speed) + "/tick", null);
+			} else if (speed > 0.5) {
+				add(found, "falling", 0, null, "airborne at " + round(speed) + "/tick", null);
+			}
+		}
+
+		if (food <= 0) add(found, "starving", 1, "eat", "food=0", null);
+		else if (food <= 6) add(found, "hungry", 1, "eat", "food=" + food, null);
+
+		if (p.isOnFire()) add(found, "on_fire", 2, null, "burning", null);
+		if (p.isInLava()) add(found, "in_lava", 2, null, "standing in lava", null);
+		if (p.getTicksFrozen() > 0) {
+			add(found, "freezing", 1, null, "frozen for " + p.getTicksFrozen() + " ticks", null);
+		}
+		if (p.isInWall()) add(found, "suffocating", 2, null, "inside a solid block", null);
+		if (level != null && p.getY() < level.getMinY() + 1) {
+			add(found, "below_world", 2, null, "y=" + round(p.getY()), null);
+		}
+
+		// Have we actually gone anywhere? A walk can be running while the player is pinned against
+		// something, and "the task says navigating" is not the same as "the player is moving".
+		double moved = Math.hypot(p.getX() - lastMoveX, p.getZ() - lastMoveZ);
+		if (Double.isNaN(lastMoveX) || moved > 0.05) {
+			stillTicks = 0;
+			lastMoveX = p.getX();
+			lastMoveZ = p.getZ();
+		} else {
+			stillTicks++;
+		}
+		JsonObject nav = BotController.get().statusJson();
+		moving = nav.has("active") && nav.get("active").getAsBoolean();
+		if (moving && stillTicks > STUCK_TICKS) {
+			add(found, "stuck", 1, "action_cancel",
+					"walk running but no progress for " + stillTicks + " ticks", null);
+		}
+
+		// Moving with nothing asked for: a current, a piston, an explosion. Worth knowing about,
+		// because it is exactly how a bot gets carried off the thing it just saved itself onto.
+		double drift = p.getDeltaMovement().horizontalDistance();
+		if (!moving && drift > 0.25) {
+			add(found, "carried_along", 1, null, "drifting at " + round(drift) + "/tick with nothing asked", null);
+		}
+
+		anomalies = found;
+		now.add("anomalies", found);
+		now.addProperty("anomalyCount", found.size());
+		if (worst != null) now.addProperty("worstAnomaly", worstId);
+
+		// Appearances and clearings, not a repeat every tick (note() collapses consecutive repeats).
+		Set<String> ids = new LinkedHashSet<>(found.keySet());
+		for (String id : ids) {
+			if (knownAnomalies.contains(id)) continue;
+			JsonObject a = found.getAsJsonObject(id);
+			String remedy = a.has("remedy") ? " -> call " + a.get("remedy").getAsString() : "";
+			note("anomaly: " + id + " (" + a.get("evidence").getAsString() + ")" + remedy);
+		}
+		for (String id : knownAnomalies) {
+			if (!ids.contains(id)) note("cleared: " + id);
+		}
+		knownAnomalies = ids;
+
+		prevHealth = h;
+		prevFood = food;
+	}
+
+	private void add(JsonObject into, String id, int severity, String remedy, String evidence, JsonObject at) {
+		JsonObject a = new JsonObject();
+		a.addProperty("severity", severity);
+		a.addProperty("evidence", evidence);
+		if (remedy != null) a.addProperty("remedy", remedy);
+		if (at != null) a.add("at", at);
+		into.add(id, a);
+		if (worst == null || severity > worst.get("severity").getAsInt()) {
+			worst = a;
+			worstId = id;
+		}
+	}
+
+	private static JsonObject firstThreat(JsonObject now) {
+		if (!now.has("threats") || !now.get("threats").isJsonArray()) return null;
+		JsonArray t = now.getAsJsonArray("threats");
+		return t.isEmpty() ? null : t.get(0).getAsJsonObject();
+	}
+
+	/** The worst anomaly from the latest sample, or null when nothing is wrong. */
+	public synchronized JsonObject topAnomaly() {
+		return worst;
+	}
+
+	public synchronized String topAnomalyId() {
+		return worst == null ? "" : worstId;
 	}
 
 	/** Latest sample plus the rolling log — the payload handed to RPC callers. */
@@ -183,6 +345,8 @@ public final class TaskObserver {
 	public int danger() {
 		if (health <= 0.0F) return 2;
 		if (maxHealth > 0.0F && health <= maxHealth * LOW_HEALTH_FRACTION) return 2;
+		if (air < AIR_ALERT) return 2;
+		if (air < 240) return 1;
 		if (closestThreat <= THREAT_CLOSE && threatCount > 0) return 2;
 		if (threatCount > 0) return 1;
 		return 0;
@@ -193,6 +357,8 @@ public final class TaskObserver {
 		if (maxHealth > 0.0F && health <= maxHealth * LOW_HEALTH_FRACTION) {
 			return "low_health " + Math.round(health) + "/" + Math.round(maxHealth);
 		}
+		if (air < AIR_ALERT) return "drowning air=" + air + " — action_surface";
+		if (air < 240) return "air_low " + air;
 		if (closestThreat <= THREAT_CLOSE && threatCount > 0) {
 			return "hostile_close " + closestThreatName + " " + round(closestThreat) + "b";
 		}
@@ -208,6 +374,10 @@ public final class TaskObserver {
 	private void raiseAlerts(LocalPlayer p) {
 		if (maxHealth > 0.0F && health <= maxHealth * LOW_HEALTH_FRACTION && health > 0.0F) {
 			noteOnce("lowhealth", "alert: health " + Math.round(health) + "/" + Math.round(maxHealth));
+		}
+		if (air < AIR_ALERT) {
+			// Bucketed so the log repeats as it gets worse instead of only once at the threshold.
+			noteOnce("air" + (air / 40), "alert: air " + air + " — surface now");
 		}
 		if (closestThreat <= THREAT_CLOSE && threatCount > 0) {
 			noteOnce("threat_" + closestThreatName, "alert: " + closestThreatName + " within "

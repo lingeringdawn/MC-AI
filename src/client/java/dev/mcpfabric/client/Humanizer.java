@@ -77,19 +77,6 @@ public final class Humanizer {
 		return enabled && rng.nextFloat() < probability;
 	}
 
-	// --- idle motion --------------------------------------------------------------------------
-
-	/**
-	 * Slow gaze drift for a person standing still, in degrees. Two incommensurate sine waves so the
-	 * motion never repeats on an obvious beat. Nobody holds their head perfectly still; a camera
-	 * that does is another giveaway.
-	 */
-	public static float idleSway(float seconds, float amplitude, float freq, float phase) {
-		double a = Math.sin(seconds * freq + phase);
-		double b = 0.5 * Math.sin(seconds * freq * 2.3 + phase * 1.7);
-		return (float) (amplitude * (a + b));
-	}
-
 	/** Small symmetric jitter, in degrees — used to keep repeated aims from landing identically. */
 	public static float jitter(Random rng, float amplitude) {
 		if (!enabled || amplitude <= 0.0F) return 0.0F;

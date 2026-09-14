@@ -50,17 +50,6 @@ public final class BotController {
 	private volatile String navState = "idle";
 	private boolean drivingKeys;
 
-	// water safety: swim up for air instead of drowning
-	/**
-	 * Air left when the bot abandons what it is doing and heads for the surface. Generous on purpose:
-	 * surfacing takes a moment, and a bot that starts late arrives with no margin.
-	 */
-	private static final int AIR_SURFACE_AT = 220;
-	/** Air that counts as "breathing again"; below this we keep the head above the water. */
-	private static final int AIR_CLEAR_AT = 290;
-	private boolean surfacing;
-	private boolean surfaceJumpHeld;
-
 	// smooth look (mouse-delta style): interpolate toward a yaw/pitch target each tick
 	/**
 	 * Look-priority levels. Several subsystems want to point the camera at once (navigation wants the
@@ -71,17 +60,7 @@ public final class BotController {
 	 */
 	public static final int LOOK_NAV = 1;
 	public static final int LOOK_TASK = 2;
-	/**
-	 * Self-defence: a mob chewing on you outranks whatever job you were doing, but not an explicit
-	 * instruction from the caller — so it sits between the task and the user.
-	 */
-	public static final int LOOK_DEFEND = 3;
-	/**
-	 * Drowning beats everything except being told what to do: once the head goes under, where the task
-	 * wanted to look stops mattering.
-	 */
-	public static final int LOOK_SAFETY = 4;
-	public static final int LOOK_USER = 5;
+	public static final int LOOK_USER = 3;
 	/** How long the current look owner keeps the view after its last refresh. */
 	private static final long LOOK_HOLD_TICKS = 3;
 
@@ -95,13 +74,6 @@ public final class BotController {
 	/** Rotation the controller last applied — compared with the live rotation to spot real mouse input. */
 	private float lastAppliedYaw = Float.NaN;
 	private float lastAppliedPitch = Float.NaN;
-
-	// idle gaze drift: a person standing still still moves their head a little
-	/** Ticks spent doing nothing at all; drives the sway phase so it always restarts smooth. */
-	private int idleTicks;
-	/** Sway value applied last tick, so only the *change* is added (never accumulates, never fights). */
-	private float swayYaw;
-	private float swayPitch;
 
 	/**
 	 * Sub-degree aim differences are ignored. Every tick the aim point is recomputed from a slightly
@@ -129,8 +101,6 @@ public final class BotController {
 	private static final float MOVE_ALIGN_DEG = 60.0F;
 	/** Randomised jump hold, so no two hops are identical. */
 	private final java.util.Random jumpRng = new java.util.Random();
-	/** Water-bucket fall save. Runs before steering and takes over while it is saving us. */
-	private final FallGuard fallGuard = new FallGuard();
 
 	// --- public control surface (called from handlers, on the render thread) ----------------
 
@@ -344,31 +314,17 @@ public final class BotController {
 				return;
 			}
 
-			// Fall protection runs first: while it is saving us it owns the movement keys and the
-			// crosshair, so skip steering for those ticks rather than fighting it for control.
-			boolean saving = McpFabric.config().enableFallSaving && fallGuard.tick(mc, p, this);
-			if (!saving && path != null) {
+			// Steering is the whole of this controller's job: it does exactly what the caller asked for,
+			// and nothing whatsoever on its own. Every other behaviour is a task the AI triggers, so
+			// there is no fall guard, no drowning reflex and no idle drift fighting for the camera.
+			if (path != null) {
 				steer(mc, p);
 			}
-			applyWaterSafety(p);
 			// Look is applied last: navigation and the active task have both had their say this tick,
-			// so the winner of the priority arbitration is what actually moves the camera. Capture
-			// whether anyone wanted the view *before* applying it, because tickLook releases the
-			// target on arrival and the sway gate below must not mistake that for "nobody cares".
-			boolean lookWanted = lookTargetYaw != null;
+			// so the winner of the priority arbitration is what actually moves the camera.
 			tickLook(p);
 			boolean driving = fwd || back || left || right || jumpHeld || sneak || sprint
 					|| jumpOnceTicks > 0 || attackHeld || useHeld || path != null;
-			// Nobody is steering or working: drift the view the way a person does instead of freezing
-			// the camera solid. Skipped the moment any owner wants the view, and never while the fall
-			// guard is holding the crosshair straight down.
-			if (!driving && !lookWanted && !saving) {
-				applyIdleSway(p);
-			} else {
-				idleTicks = 0;
-				swayYaw = 0.0F;
-				swayPitch = 0.0F;
-			}
 			if (driving) {
 				applyKeys(mc.options);
 				drivingKeys = true;
@@ -442,25 +398,6 @@ public final class BotController {
 		float yaw = yawDone ? ty : p.getYRot() + Mth.clamp(dYaw, -yawStep, yawStep);
 		float pitch = pitchDone ? targetPitch : p.getXRot() + Mth.clamp(dPitch, -pitchStep, pitchStep);
 		applyLook(p, yaw, pitch);
-	}
-
-	/**
-	 * Drift the view a fraction of a degree at a time while the bot is idle, so a standing player is
-	 * not a locked-off camera. Only the <em>change</em> in the sway curve is added to the live
-	 * rotation: that way real mouse input is never fought and no offset accumulates, and when the
-	 * sway stops the view simply stays where it is.
-	 */
-	private void applyIdleSway(LocalPlayer p) {
-		idleTicks++;
-		float seconds = idleTicks / 20.0F;
-		float yawSway = Humanizer.idleSway(seconds, 1.6F, 0.35F, 0.0F);
-		float pitchSway = Humanizer.idleSway(seconds, 0.8F, 0.27F, 1.3F);
-		float dYaw = yawSway - swayYaw;
-		float dPitch = pitchSway - swayPitch;
-		swayYaw = yawSway;
-		swayPitch = pitchSway;
-		if (dYaw == 0.0F && dPitch == 0.0F) return;
-		applyLook(p, p.getYRot() + dYaw, Mth.clamp(p.getXRot() + dPitch, -90.0F, 90.0F));
 	}
 
 	private void applyLook(LocalPlayer p, float yaw, float pitch) {
@@ -759,57 +696,6 @@ public final class BotController {
 		this.path = fresh;
 		this.pathIndex = 0;
 		return true;
-	}
-
-	/**
-	 * Never drown. The moment the head goes under with the air bar running low, the bot drops what it
-	 * is doing and strokes upward until it can breathe again. Runs after navigation so it always wins,
-	 * and works even when no task is active — otherwise the bot would happily leave the player bobbing
-	 * under the surface until they died.
-	 */
-	private void applyWaterSafety(LocalPlayer p) {
-		boolean eyeUnder = p.isUnderWater();
-		if (!p.isInWater()) {
-			surfacing = false;
-		} else if (eyeUnder) {
-			// While a path is being followed the bot may be diving to a submerged node on purpose, so
-			// hold off until the air genuinely runs low. With no path it is only in the water by
-			// accident — idle, pushed in, or knocked back into it — and there is no reason to let it
-			// sink at all, so keep the head up from the first bubble lost.
-			int limit = path != null ? AIR_SURFACE_AT : 300;
-			if (p.getAirSupply() <= limit) surfacing = true;
-		} else if (p.getAirSupply() >= AIR_CLEAR_AT) {
-			// Head is clear and the lungs are full again: safe.
-			surfacing = false;
-		}
-		if (surfacing) {
-			// Override whatever the task wanted: rise straight up until we can breathe.
-			fwd = back = left = right = false;
-			sprint = false;
-			// Stroke only while the eyes are actually under water. Holding the key the whole time
-			// launches the bot clear of the surface and it drops straight back with a splash — the head
-			// then ping-pongs between the air and the pond floor, which reads as drowning and wastes the
-			// stroke. Pulsing it keeps the head riding the waterline, which is what treading water looks
-			// like, and the eyes break the surface every few ticks so the air bar refills.
-			jumpHeld = surfaceStroke(p);
-			surfaceJumpHeld = jumpHeld;
-			// Tilt the view toward the surface while stroking up. The swim itself is driven by the jump
-			// key, but a bot that keeps its face pointed at the pond floor while rising looks like it is
-			// drowning on purpose.
-			lookAtTarget(p.getYRot(), -45.0F, LOOK_SAFETY);
-		} else if (surfaceJumpHeld) {
-			jumpHeld = false;
-			surfaceJumpHeld = false;
-		}
-	}
-
-	/**
-	 * Whether to push upward this tick while surfacing: yes while the eyes are under water, no once they
-	 * break the surface. Vanilla swims on the jump key, so a steady hold launches the bot clean out of
-	 * the pond and drops it back; pulsing keeps the head at the waterline instead.
-	 */
-	private static boolean surfaceStroke(LocalPlayer p) {
-		return p.isUnderWater();
 	}
 
 	private void stopNavigationInternal(String reason) {

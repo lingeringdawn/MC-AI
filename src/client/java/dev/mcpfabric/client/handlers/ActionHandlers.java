@@ -18,7 +18,10 @@ import dev.mcpfabric.client.tasks.CraftTask;
 import dev.mcpfabric.client.tasks.EatTask;
 import dev.mcpfabric.client.tasks.MineBlockTask;
 import dev.mcpfabric.client.tasks.MineVeinTask;
+import dev.mcpfabric.client.tasks.MlgTask;
 import dev.mcpfabric.client.tasks.MoveToTask;
+import dev.mcpfabric.client.tasks.RetreatTask;
+import dev.mcpfabric.client.tasks.SurfaceTask;
 import dev.mcpfabric.client.tasks.TaskManager;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.item.Item;
@@ -66,6 +69,32 @@ public final class ActionHandlers {
 		router.register("action.swing", ctx -> run(ctx, ctx2 -> new SwingTask(
 				uuid(ctx2, "uuid"), Math.max(0, ctx2.optInt("swings", 1))),
 				ctx.optInt("timeoutSeconds", 10)));
+
+		// Withdraw from something. Nothing calls this on the bot's own initiative: the observation feed
+		// reports health and nearby hostiles, and the caller decides whether to back off.
+		router.register("action.retreat", ctx -> {
+			double distance = Math.max(1.5, Math.min(64.0, ctx.optDouble("distance", 6.0)));
+			RetreatTask task;
+			if (ctx.has("uuid")) {
+				task = new RetreatTask(uuid(ctx, "uuid"), distance);
+			} else if (ctx.has("x") && ctx.has("y") && ctx.has("z")) {
+				task = new RetreatTask(ctx.getDouble("x"), ctx.getDouble("y"), ctx.getDouble("z"), distance);
+			} else {
+				throw RpcException.badRequest("Give either 'uuid' (back away from an entity) "
+						+ "or 'x'/'y'/'z' (back away from a coordinate).");
+			}
+			return run(ctx, ctx2 -> task, ctx.optInt("timeoutSeconds", 20));
+		});
+
+		// Swim up for air. There is no drowning reflex any more: the caller watches the air bar in the
+		// observation feed and asks for this when it wants the head above water.
+		router.register("action.surface", ctx -> run(ctx, ctx2 -> new SurfaceTask(),
+				ctx.optInt("timeoutSeconds", 20)));
+
+		// Place water under yourself mid-fall and take it back. Explicit for the same reason: whether a
+		// drop is worth saving is a decision, not a reflex.
+		router.register("action.mlg", ctx -> run(ctx, ctx2 -> new MlgTask(),
+				ctx.optInt("timeoutSeconds", 20)));
 
 		router.register("action.craft", ActionHandlers::craftAction);
 
