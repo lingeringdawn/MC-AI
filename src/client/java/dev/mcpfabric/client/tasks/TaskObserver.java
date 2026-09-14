@@ -21,8 +21,10 @@ import net.minecraft.world.phys.Vec3;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -52,10 +54,25 @@ public final class TaskObserver {
 	 * standing between the bot and a lungful of water is the caller noticing this number.
 	 */
 	private static final int AIR_ALERT = 120;
+	/** Air at which being under water becomes urgent, i.e. worth a remedy rather than a warning. */
+	private static final int DROWNING_AIR = 240;
+	/** Air at which being under water is first worth mentioning at all. */
+	private static final int AIR_LOW = 285;
 	/** Fall distance already accumulated that is enough to hurt: 4 blocks is 1 damage, and rising. */
 	private static final double HARMFUL_FALL = 4.0;
 	/** A walk that has made no progress for this many ticks is wedged, not walking. */
 	private static final int STUCK_TICKS = 25;
+	/**
+	 * How long a cleared anomaly stays in the snapshot (3s). Long enough for a caller polling a couple
+	 * of times a second to see it, short enough that it is not mistaken for something still happening —
+	 * a stale entry is marked, and a live one always outranks it.
+	 */
+	private static final int ANOMALY_STICKY_TICKS = 60;
+	/** Which anomaly the single recommended call should address first: most likely to kill you first. */
+	private static final String[] ANOMALY_PRIORITY = {
+			"dead", "below_world", "in_lava", "drowning", "falling_hard", "suffocating", "on_fire",
+			"low_health", "starving", "hungry", "stuck",
+	};
 
 	private final Deque<JsonObject> log = new ArrayDeque<>();
 	private final List<String> logKeys = new ArrayList<>();
@@ -93,8 +110,13 @@ public final class TaskObserver {
 	/** The worst one this tick, or null. */
 	private JsonObject worst;
 	private String worstId = "";
+	/** The recommended call for the current situation, already carrying its arguments. */
+	private JsonObject nextRecommended;
 	/** Ids seen last tick, used to log appearance and clearing rather than repeating every tick. */
 	private Set<String> knownAnomalies = new LinkedHashSet<>();
+	/** When each anomaly was first seen, and its last description, so a one-tick event stays visible. */
+	private final Map<String, Long> anomalySince = new HashMap<>();
+	private final Map<String, JsonObject> anomalyLast = new HashMap<>();
 
 	/** Begin observing a task; resets the log and the sample baseline. */
 	public void begin(ClientTask task) {
@@ -207,9 +229,18 @@ public final class TaskObserver {
 			add(found, "dead", 2, "action_cancel", "health=0", null);
 		} else if (maxHealth > 0.0F && h <= maxHealth * LOW_HEALTH_FRACTION) {
 			JsonObject threat = firstThreat(now);
+			// Carry the attacker's UUID as well as its position, so the recommended retreat can name
+			// the exact entity instead of a spot it has already walked away from.
+			JsonObject at = null;
+			if (threat != null && threat.has("pos")) {
+				at = threat.getAsJsonObject("pos").deepCopy();
+				if (threat.has("uuid")) at.addProperty("uuid", threat.get("uuid").getAsString());
+			}
 			add(found, "low_health", 2, threat != null ? "retreat_from" : null,
-					"health=" + Math.round(h) + "/" + Math.round(maxHealth),
-					threat != null && threat.has("pos") ? threat.getAsJsonObject("pos") : null);
+					"health=" + Math.round(h) + "/" + Math.round(maxHealth)
+							+ (threat != null ? ", " + threat.get("name").getAsString() + " within "
+							+ threat.get("distance").getAsString() + "b" : ""),
+					at);
 		}
 
 		float lost = prevHealth - h;
@@ -218,8 +249,15 @@ public final class TaskObserver {
 					"lost " + round(lost) + " health since the last sample", null);
 		}
 
-		if (p.isUnderWater() && air < 240) {
-			add(found, "drowning", 2, "surface", "air=" + air + ", eyes under water", null);
+		if (p.isUnderWater()) {
+			// Two stages on purpose. The warning goes out while there is still time to think, but only
+			// the urgent one carries a remedy — otherwise 'react' would surface the bot every time it
+			// ducked under deliberately.
+			if (air < DROWNING_AIR) {
+				add(found, "drowning", 2, "surface", "air=" + air + ", eyes under water", null);
+			} else if (air < AIR_LOW) {
+				add(found, "low_air", 1, null, "air=" + air + ", eyes under water", null);
+			}
 		}
 
 		if (!p.onGround() && !p.isInWater() && !p.getAbilities().flying && !p.isFallFlying()) {
@@ -269,26 +307,138 @@ public final class TaskObserver {
 			add(found, "carried_along", 1, null, "drifting at " + round(drift) + "/tick with nothing asked", null);
 		}
 
-		anomalies = found;
-		now.add("anomalies", found);
-		now.addProperty("anomalyCount", found.size());
-		if (worst != null) now.addProperty("worstAnomaly", worstId);
-
-		// Appearances and clearings, not a repeat every tick (note() collapses consecutive repeats).
-		Set<String> ids = new LinkedHashSet<>(found.keySet());
-		for (String id : ids) {
+		// --- report -----------------------------------------------------------------------------
+		// Transitions are logged from the raw detection, so the log stays an exact record.
+		Set<String> raw = new LinkedHashSet<>(found.keySet());
+		for (String id : raw) {
 			if (knownAnomalies.contains(id)) continue;
 			JsonObject a = found.getAsJsonObject(id);
 			String remedy = a.has("remedy") ? " -> call " + a.get("remedy").getAsString() : "";
 			note("anomaly: " + id + " (" + a.get("evidence").getAsString() + ")" + remedy);
 		}
 		for (String id : knownAnomalies) {
-			if (!ids.contains(id)) note("cleared: " + id);
+			if (!raw.contains(id)) note("cleared: " + id);
 		}
-		knownAnomalies = ids;
+		knownAnomalies = raw;
+
+		// --- but keep a just-cleared anomaly visible in the snapshot for a moment ----------------
+		// Something that lasts a single tick — one hit taken, one stumble — would otherwise only ever
+		// be reachable by reading the log, and a caller polling twice a second would miss exactly the
+		// events it most needs to react to.
+		for (String id : raw) {
+			anomalySince.putIfAbsent(id, (long) ticks);
+			anomalyLast.put(id, found.getAsJsonObject(id));
+		}
+		Set<String> report = new LinkedHashSet<>(raw);
+		for (String id : new ArrayList<>(anomalyLast.keySet())) {
+			if (raw.contains(id)) continue;
+			Long since = anomalySince.get(id);
+			if (since == null || ticks - since > ANOMALY_STICKY_TICKS) {
+				anomalyLast.remove(id);
+				anomalySince.remove(id);
+				continue;
+			}
+			report.add(id);
+		}
+
+		JsonObject reported = new JsonObject();
+		worst = null;
+		worstId = "";
+		for (String id : report) {
+			boolean fresh = raw.contains(id);
+			JsonObject a = fresh ? found.getAsJsonObject(id).deepCopy() : anomalyLast.get(id).deepCopy();
+			if (!fresh) {
+				a.addProperty("stale", true);
+				a.addProperty("ageTicks", ticks - anomalySince.get(id));
+			}
+			reported.add(id, a);
+			pickWorst(id, a, fresh);
+		}
+		anomalies = reported;
+		now.add("anomalies", reported);
+		now.addProperty("anomalyCount", reported.size());
+		if (worst != null) {
+			now.addProperty("worstAnomaly", worstId);
+			nextRecommended = nextAction(reported, report);
+			if (nextRecommended != null) now.add("nextAction", nextRecommended.deepCopy());
+		} else {
+			nextRecommended = null;
+		}
+		now.addProperty("summary", summary(report, h, food));
 
 		prevHealth = h;
 		prevFood = food;
+	}
+
+	/**
+	 * Keep the most urgent anomaly on top. A live one outranks a stale one whatever their severities:
+	 * acting on something that has already stopped is worse than acting on something smaller that is
+	 * still true.
+	 */
+	private void pickWorst(String id, JsonObject a, boolean fresh) {
+		int severity = a.get("severity").getAsInt();
+		if (worst == null) {
+			worst = a;
+			worstId = id;
+			return;
+		}
+		boolean worstFresh = !worst.has("stale");
+		if (fresh && !worstFresh) {
+			worst = a;
+			worstId = id;
+			return;
+		}
+		if (fresh == worstFresh && severity > worst.get("severity").getAsInt()) {
+			worst = a;
+			worstId = id;
+		}
+	}
+
+	/**
+	 * The single call that deals with the current situation, ready to run: tool name plus arguments,
+	 * with the offending entity's UUID already filled in. Turning "I can see I am drowning" into one
+	 * request is the difference between reacting in time and narrating your own death.
+	 */
+	private JsonObject nextAction(JsonObject reported, Set<String> ids) {
+		for (String id : ANOMALY_PRIORITY) {
+			if (!ids.contains(id)) continue;
+			JsonObject a = reported.getAsJsonObject(id);
+			if (a == null || !a.has("remedy")) continue;
+			String remedy = a.get("remedy").getAsString();
+			JsonObject call = new JsonObject();
+			call.addProperty("tool", remedy);
+			JsonObject args = new JsonObject();
+			if (a.has("at") && a.get("at").isJsonObject()) {
+				JsonObject at = a.getAsJsonObject("at");
+				if (at.has("uuid")) {
+					args.addProperty("uuid", at.get("uuid").getAsString());
+				} else if (at.has("x")) {
+					args.addProperty("x", at.get("x").getAsDouble());
+					args.addProperty("y", at.get("y").getAsDouble());
+					args.addProperty("z", at.get("z").getAsDouble());
+				}
+			}
+			if ("retreat_from".equals(remedy)) args.addProperty("distance", 8);
+			call.add("args", args);
+			call.addProperty("because", a.get("evidence").getAsString());
+			return call;
+		}
+		return null;
+	}
+
+	/** One line to read at a glance, instead of assembling the situation from a dozen fields. */
+	private String summary(Set<String> ids, float h, int food) {
+		StringBuilder sb = new StringBuilder();
+		sb.append("hp ").append(Math.round(h)).append('/').append(Math.round(maxHealth));
+		sb.append(", food ").append(food).append(", air ").append(air);
+		if (moving) sb.append(", walking");
+		if (threatCount > 0) {
+			sb.append(", ").append(threatCount).append(" hostile, nearest ")
+					.append(round(closestThreat)).append('b');
+		}
+		if (dropCount > 0) sb.append(", ").append(dropCount).append(" drop(s)");
+		if (!ids.isEmpty()) sb.append(" | ").append(String.join(", ", ids));
+		return sb.toString();
 	}
 
 	private void add(JsonObject into, String id, int severity, String remedy, String evidence, JsonObject at) {
@@ -313,6 +463,14 @@ public final class TaskObserver {
 	/** The worst anomaly from the latest sample, or null when nothing is wrong. */
 	public synchronized JsonObject topAnomaly() {
 		return worst;
+	}
+
+	/**
+	 * The single call that answers the current situation (tool + arguments), or null when there is
+	 * nothing worth doing. This is what {@code action.react} runs.
+	 */
+	public synchronized JsonObject nextAction() {
+		return nextRecommended;
 	}
 
 	public synchronized String topAnomalyId() {
@@ -464,6 +622,9 @@ public final class TaskObserver {
 			}
 			if (threats.size() < 8) {
 				JsonObject t = new JsonObject();
+				// The UUID is what a remedy needs to target this exact mob, so it travels with the
+				// threat and ends up in nextAction.args — the caller should never have to hunt for it.
+				t.addProperty("uuid", mob.getUUID().toString());
 				t.addProperty("name", mob.getName().getString());
 				t.addProperty("id", BuiltInRegistries.ENTITY_TYPE.getKey(mob.getType()).toString());
 				t.addProperty("distance", round(d));

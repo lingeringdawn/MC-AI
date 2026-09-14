@@ -9,6 +9,7 @@ import dev.mcpfabric.bridge.RpcContext;
 import dev.mcpfabric.bridge.RpcException;
 import dev.mcpfabric.bridge.RpcRouter;
 import dev.mcpfabric.client.ClientMc;
+import dev.mcpfabric.client.tasks.AnomalyResponder;
 import dev.mcpfabric.client.tasks.ApproachTask;
 import dev.mcpfabric.client.tasks.AttackTask;
 import dev.mcpfabric.client.tasks.ClientTask;
@@ -101,6 +102,20 @@ public final class ActionHandlers {
 		router.register("action.status", ctx -> TaskManager.get().status());
 
 		router.register("action.observe", ctx -> TaskManager.get().observe());
+
+		// React to whatever the observation says is wrong, in one call. The remedy is the one the
+		// observer already computed (tool + arguments + the offending entity), and it goes out after a
+		// human reaction time rather than on the exact tick the state changed — which is the difference
+		// between looking like you noticed and looking like a script.
+		router.register("action.react", ctx -> ClientMc.call(() -> {
+			requireControl();
+			JsonObject out = AnomalyResponder.get().requestReaction(ClientMc.mc());
+			if (out == null) {
+				throw RpcException.unavailable("Nothing to react to: the observation recommends no remedy "
+						+ "right now. Call action.observe for the full picture, or action.status.");
+			}
+			return out;
+		}));
 
 		router.register("action.cancel", ctx -> ClientMc.call(() -> {
 			TaskManager.get().cancel(ClientMc.mc());

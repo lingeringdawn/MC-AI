@@ -689,6 +689,26 @@ export const TOOLS: ToolDef[] = [
     annotations: READ,
   },
   {
+    name: "react",
+    method: "action.react",
+    title: "Deal with whatever is wrong, now",
+    description:
+      "Client-only. The fast path for acting on the live state: the observation already works out the " +
+      "single best thing to do about the current situation, and this runs it. No arguments — it reads " +
+      'the remedy from observe.nextAction (tool + arguments, with the offending entity\'s UUID already ' +
+      "filled in) and executes it. Use it the moment observe.danger hits 2 rather than assembling an " +
+      "action yourself.\n" +
+      "The remedy goes out after a short human reaction time (150-350ms) rather than on the exact tick " +
+      "the state changed, because instant reactions are the clearest machine tell. Blocking: returns " +
+      '{queued, args, inTicks, because} once the reaction is scheduled. Errors if observe.nextAction is ' +
+      "empty, i.e. there is nothing worth doing right now.\n" +
+      "Remedies it can run: surface (drowning), water_bucket_save (a fall already long enough to hurt), " +
+      "eat (starving), retreat_from (low health with a mob on you), action_cancel (dead, or wedged). " +
+      "It never interrupts an action you asked for — if one is running, cancel it first.",
+    inputSchema: {},
+    annotations: WRITE,
+  },
+  {
     name: "observe",
     method: "action.observe",
     title: "Observe the world right now",
@@ -698,6 +718,12 @@ export const TOOLS: ToolDef[] = [
       "action is running and what it is doing, and a rolling log of notable moments. Use it to look before you act, or " +
       'to keep watching while another call is in flight; "observe.danger" is 0 (fine) / 1 (caution) / 2 (act now), ' +
       "and dangerReason names the cause (low_health / drowning air=N / hostile_close / dead). " +
+      "Also reports what is going WRONG in real time, which is the part a health bar hides: an 'anomalies' map " +
+      "(dead / drowning / falling_hard / in_lava / suffocating / on_fire / freezing / below_world / starving / hungry " +
+      "/ low_health / taking_damage / stuck / carried_along), each with severity, the evidence, and the remedy to " +
+      "call. A cleared anomaly stays listed for a few seconds marked 'stale' so a fast one (a single hit) is not " +
+      "missed between polls. 'summary' is the whole situation in one line, and 'nextAction' is the single call that " +
+      "deals with it, arguments included — pass it to 'react' to act immediately.\n" +
       "This is the ONLY source of awareness: the mod never acts on its own — it will not surface, fight, retreat or " +
       "save itself unless you call for it — so read this, then issue the short action you want. " +
       "Works whether idle or mid-action.",
