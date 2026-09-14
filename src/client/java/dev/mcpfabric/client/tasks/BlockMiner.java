@@ -1,14 +1,14 @@
 package dev.mcpfabric.client.tasks;
 
+import com.mojang.blaze3d.platform.InputConstants;
 import dev.mcpfabric.client.BotController;
 import dev.mcpfabric.client.Humanizer;
 import dev.mcpfabric.client.nav.AStarPathfinder;
+import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
-import net.minecraft.world.InteractionHand;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
@@ -60,8 +60,8 @@ final class BlockMiner {
 	private int walks;
 	private int navTicks;
 	private BlockPos clearing;
-	/** The block whose break we have already started, so start is not re-issued every tick. */
-	private BlockPos destroying;
+	/** The block whose press edge has already been sent, so a new one is not issued every tick. */
+	private BlockPos digging;
 	/** Ticks the crosshair has rested on the block; models the look-then-swing beat. */
 	private int settleTicks;
 
@@ -111,14 +111,14 @@ final class BlockMiner {
 		// arrive (isLookSettled) instead of re-issuing the aim forever.
 		if (!BotController.get().isLookSettled() && BotController.get().lookErrorDeg() > 3.0F) {
 			settleTicks = 0;
-			stopBreaking(mc);
+			stopDigging();
 			return State.WORKING;
 		}
 		// A person looks at the block for a beat before swinging at it; pressing the instant the
 		// crosshair lands reads as a machine.
 		if (Humanizer.enabled() && settleTicks < WINDUP_TICKS) {
 			settleTicks++;
-			stopBreaking(mc);
+			stopDigging();
 			return State.WORKING;
 		}
 
@@ -132,10 +132,10 @@ final class BlockMiner {
 		// 1) Clear shot at the target, in reach: this is the good case, just dig it.
 		if (pos.equals(hitPos) && reach <= REACH) {
 			clearing = null;
-			startBreaking(mc, p, pos, hit.getDirection());
+			dig(mc, pos);
 			return State.WORKING;
 		}
-		stopBreaking(mc);
+		stopDigging();
 		if (isNavigating()) {
 			if (++navTicks <= NAV_LIMIT_TICKS) return State.WORKING;
 			// The walk is going nowhere: drop it and let the strategies below have a turn. Digging the
@@ -171,7 +171,7 @@ final class BlockMiner {
 				return State.WORKING;
 			}
 			// Crosshair already rests on the obstruction.
-			startBreaking(mc, p, clearing, hit.getDirection());
+			dig(mc, clearing);
 			return State.WORKING;
 		}
 
@@ -183,35 +183,36 @@ final class BlockMiner {
 	}
 
 	/**
-	 * Keep breaking one block by driving the destruction calls the vanilla input pipeline makes for a
-	 * held left button, rather than leaving the attack key pressed.
+	 * Dig by holding the real attack key and, once per block, registering a click — the same two things
+	 * a person does. Vanilla's own input handling then fires the press edge that starts the break and
+	 * carries it on for as long as the button stays down.
 	 *
-	 * <p>Merely holding the key is not enough: the "start breaking" branch fires on the press edge and
-	 * only the "continue" branch runs while it is held, so a key that is nothing but down can leave the
-	 * bot swinging at a block that never actually starts to break. That is the block-side twin of the
-	 * entity-attack bug, and it looks identical from the outside — crosshair on target, key pressed,
-	 * block untouched.
+	 * <p>Calling {@code gameMode.startDestroyBlock}/{@code continueDestroyBlock} directly looked as if it
+	 * worked: the block disappeared, in about a quarter of the time a bare hand should take. What it did
+	 * not do was produce anything — a chopped trunk left no wood on the ground, because the break was
+	 * never the one the server agreed to. Going through the input path means the break is started,
+	 * progressed and finished by exactly the code that runs when a player holds the button.
 	 */
-	private void startBreaking(Minecraft mc, LocalPlayer p, BlockPos target, Direction face) {
-		if (mc.gameMode == null) return;
-		if (!target.equals(destroying)) {
-			mc.gameMode.startDestroyBlock(target, face);
-			destroying = target.immutable();
+	private void dig(Minecraft mc, BlockPos target) {
+		// The controller applies this to the real key every tick, so the button stays down.
+		BotController.get().setAttackHeld(true);
+		if (!target.equals(digging)) {
+			digging = target.immutable();
+			// One press edge per block: this is what makes vanilla start breaking it at all. It is the
+			// same call the mouse handler makes on a real left click (button 0), which is why it reaches
+			// the attack binding rather than a copy of it.
+			KeyMapping.click(InputConstants.Type.MOUSE.getOrCreate(0));
 		}
-		mc.gameMode.continueDestroyBlock(target, face);
-		p.swing(InteractionHand.MAIN_HAND);
+	}
+
+	private void stopDigging() {
+		digging = null;
 		// Never leave the button held: a stuck attack key would dig whatever the crosshair drifts onto.
 		BotController.get().setAttackHeld(false);
 	}
 
-	private void stopBreaking(Minecraft mc) {
-		destroying = null;
-		BotController.get().setAttackHeld(false);
-	}
-
 	private void stop() {
-		destroying = null;
-		BotController.get().setAttackHeld(false);
+		stopDigging();
 		BotController.get().stopNavigation("cancelled");
 	}
 
