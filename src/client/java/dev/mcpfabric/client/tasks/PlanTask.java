@@ -21,7 +21,7 @@ import java.util.List;
  * round-trip instead of nine, and the steps run back-to-back on the game thread with no chance for the
  * world to move underneath the plan between them.
  *
- * <p>A step is either a module ({@code {"action":"mineBlock","x":..}}) — a multi-tick task, built when
+ * <p>A step is either a module ({@code {"action":"dig","x":..}}) — a multi-tick task, built when
  * its turn comes so a symbolic target like {@code "nearest_drop"} resolves against the world as it is
  * <em>then</em>, not as it was when the plan was written — or any other method fired inline
  * ({@code {"rpc":"inventory.selectHotbar","slot":0}}).

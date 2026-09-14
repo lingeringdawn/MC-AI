@@ -1125,7 +1125,7 @@ export const TOOLS: ToolDef[] = [
     title: "Observe the world right now",
     description:
       "Client-only, READ-ONLY. A live situational snapshot, sampled every tick: your vitals (health/food/air/position), " +
-      "nearby hostile mobs with distance, dropped items on the ground, what the crosshair is on, whether a blocking " +
+      "nearby hostile mobs with distance, dropped items on the ground, what the crosshair is on, whether an " +
       "action is running and what it is doing, and a rolling log of notable moments. Use it to look before you act, or " +
       'to keep watching while another call is in flight; "observe.danger" is 0 (fine) / 1 (caution) / 2 (act now), ' +
       "and dangerReason names the cause (low_health / drowning air=N / hostile_close / dead). " +

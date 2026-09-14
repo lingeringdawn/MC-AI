@@ -186,7 +186,7 @@ public final class VisionHandlers {
 					+ "transparent:true (often the thing worth clearing first). 'wet' means the block sits "
 					+ "in liquid, 'inReach' means it is close enough to act on, 'hardness' is how slow it "
 					+ "will be: facts to choose between, not a recommendation. Nothing here decides for "
-					+ "you, and mine_block digs whatever position you give it.");
+					+ "you, and dig digs whatever position you give it.");
 			return o;
 		}));
 	}

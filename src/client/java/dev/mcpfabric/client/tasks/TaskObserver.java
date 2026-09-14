@@ -52,9 +52,9 @@ public final class TaskObserver {
 	/** Health at/below this fraction of max raises the danger level. */
 	private static final float LOW_HEALTH_FRACTION = 0.35F;
 	/**
-	 * Air at/below this is reported as an emergency. It is the caller's cue to ask for
-	 * {@code action.surface}: the mod deliberately has no drowning reflex of its own, so the only thing
-	 * standing between the bot and a lungful of water is the caller noticing this number.
+	 * Air at/below this is reported as an emergency. The mod deliberately has no drowning reflex of its
+	 * own — it reports and nothing else — so the only thing standing between the bot and a lungful of
+	 * water is the caller noticing this number (or a rule it wrote against it).
 	 */
 	private static final int AIR_ALERT = 120;
 	/** Air at which being under water becomes urgent, i.e. worth a remedy rather than a warning. */
@@ -107,13 +107,12 @@ public final class TaskObserver {
 	private int dropCount;
 	private float health = 20.0F;
 	private float maxHealth = 20.0F;
-	/** Air left in the current lungful; the caller's cue to ask for {@code action.surface}. */
+	/** Air left in the current lungful; the caller's cue to look at the water it is standing in. */
 	private int air = 300;
 
 	// --- anomaly detection: what is wrong with the player right now --------------------------
 	/** Health at the previous sample, so a hit is visible as a delta rather than only as a value. */
 	private float prevHealth = 20.0F;
-	private int prevFood = 20;
 	/** Where the player was the last time they actually moved, to spot being wedged. */
 	private double lastMoveX = Double.NaN;
 	private double lastMoveZ = Double.NaN;
@@ -243,14 +242,14 @@ public final class TaskObserver {
 	}
 
 	/**
-	 * Read the player's condition every tick and report anything abnormal, with the evidence and the
-	 * module that fixes it.
+	 * Read the player's condition every tick and report anything abnormal, with the evidence.
 	 *
 	 * <p>This is the part a health bar alone hides: drowning with air quietly ticking down, a fall
 	 * already long enough to hurt, being on fire, freezing, wedged while a walk is running, being
-	 * carried along by water you placed yourself. Every entry carries a {@code remedy} naming the
-	 * action to call, so handling it is a lookup rather than a guess — and the set is diffed against
-	 * last tick, so the log shows a problem appearing and clearing instead of repeating every tick.
+	 * carried along by water you placed yourself. Every entry is a fact — what is wrong, how bad, the
+	 * evidence, and where the thing that caused it is. There is deliberately no remedy: naming a module
+	 * to call is a judgement, and the caller makes it (or writes a rule that does). The set is diffed
+	 * against last tick, so the log shows a problem appearing and clearing instead of repeating.
 	 */
 	private void sampleAnomalies(LocalPlayer p, ClientLevel level, JsonObject now) {
 		JsonObject found = new JsonObject();
@@ -259,17 +258,17 @@ public final class TaskObserver {
 		int food = p.getFoodData().getFoodLevel();
 
 		if (h <= 0.0F) {
-			add(found, "dead", 2, "action_cancel", "health=0", null);
+			add(found, "dead", 2, "health=0", null);
 		} else if (maxHealth > 0.0F && h <= maxHealth * LOW_HEALTH_FRACTION) {
 			JsonObject threat = firstThreat(now);
-			// Carry the attacker's UUID as well as its position, so the recommended retreat can name
-			// the exact entity instead of a spot it has already walked away from.
+			// Carry the attacker's UUID as well as its position, so the caller can see exactly which
+			// entity is responsible rather than only roughly where it was.
 			JsonObject at = null;
 			if (threat != null && threat.has("pos")) {
 				at = threat.getAsJsonObject("pos").deepCopy();
 				if (threat.has("uuid")) at.addProperty("uuid", threat.get("uuid").getAsString());
 			}
-			add(found, "low_health", 2, threat != null ? "retreat_from" : null,
+			add(found, "low_health", 2,
 					"health=" + Math.round(h) + "/" + Math.round(maxHealth)
 							+ (threat != null ? ", " + threat.get("name").getAsString() + " within "
 							+ threat.get("distance").getAsString() + "b" : ""),
@@ -281,14 +280,9 @@ public final class TaskObserver {
 			// Say who did it, not merely that it happened. "Lost 2 health" leaves the caller unable to
 			// tell a zombie in melee range from a fall off a ledge, and those want opposite answers — and
 			// a caller that cannot see the attacker will keep restarting the task the attacker keeps
-			// interrupting. The damage source knows who; the position and id come with it so the remedy
-			// can be aimed without another lookup.
+			// interrupting.
 			Entity attacker = attackerOf(p);
-			String remedy = null;
-			if (attacker != null) {
-				remedy = h <= maxHealth * LOW_HEALTH_FRACTION ? "retreat_from" : "swing_at_entity";
-			}
-			add(found, "taking_damage", attacker != null ? 2 : (lost >= 4.0F ? 2 : 1), remedy,
+			add(found, "taking_damage", attacker != null ? 2 : (lost >= 4.0F ? 2 : 1),
 					(attacker == null
 							? "took damage from the world, not a creature"
 							: attacker.getName().getString() + " hit me, " + round(p.distanceTo(attacker))
@@ -298,37 +292,36 @@ public final class TaskObserver {
 		}
 
 		if (p.isUnderWater()) {
-			// Two stages on purpose. The warning goes out while there is still time to think, but only
-			// the urgent one carries a remedy — otherwise 'react' would surface the bot every time it
-			// ducked under deliberately.
+			// Two stages on purpose: air below the drowning line is urgent, air merely low is a warning
+			// with time to think. Neither carries an action — how to get out is the caller's call.
 			if (air < DROWNING_AIR) {
-				add(found, "drowning", 2, "surface", "air=" + air + ", eyes under water", null);
+				add(found, "drowning", 2, "air=" + air + ", eyes under water", null);
 			} else if (air < AIR_LOW) {
-				add(found, "low_air", 1, null, "air=" + air + ", eyes under water", null);
+				add(found, "low_air", 1, "air=" + air + ", eyes under water", null);
 			}
 		}
 
 		if (!p.onGround() && !p.isInWater() && !p.getAbilities().flying && !p.isFallFlying()) {
 			double speed = Math.abs(p.getDeltaMovement().y);
 			if (p.fallDistance >= HARMFUL_FALL) {
-				add(found, "falling_hard", 2, "water_bucket_save",
+				add(found, "falling_hard", 2,
 						"fallen " + round(p.fallDistance) + " blocks at " + round(speed) + "/tick", null);
 			} else if (speed > 0.5) {
-				add(found, "falling", 0, null, "airborne at " + round(speed) + "/tick", null);
+				add(found, "falling", 0, "airborne at " + round(speed) + "/tick", null);
 			}
 		}
 
-		if (food <= 0) add(found, "starving", 1, "eat", "food=0", null);
-		else if (food <= 6) add(found, "hungry", 1, "eat", "food=" + food, null);
+		if (food <= 0) add(found, "starving", 1, "food=0", null);
+		else if (food <= 6) add(found, "hungry", 1, "food=" + food, null);
 
-		if (p.isOnFire()) add(found, "on_fire", 2, null, "burning", null);
-		if (p.isInLava()) add(found, "in_lava", 2, null, "standing in lava", null);
+		if (p.isOnFire()) add(found, "on_fire", 2, "burning", null);
+		if (p.isInLava()) add(found, "in_lava", 2, "standing in lava", null);
 		if (p.getTicksFrozen() > 0) {
-			add(found, "freezing", 1, null, "frozen for " + p.getTicksFrozen() + " ticks", null);
+			add(found, "freezing", 1, "frozen for " + p.getTicksFrozen() + " ticks", null);
 		}
-		if (p.isInWall()) add(found, "suffocating", 2, null, "inside a solid block", null);
+		if (p.isInWall()) add(found, "suffocating", 2, "inside a solid block", null);
 		if (level != null && p.getY() < level.getMinY() + 1) {
-			add(found, "below_world", 2, null, "y=" + round(p.getY()), null);
+			add(found, "below_world", 2, "y=" + round(p.getY()), null);
 		}
 
 		// Have we actually gone anywhere? A walk can be running while the player is pinned against
@@ -344,15 +337,14 @@ public final class TaskObserver {
 		JsonObject nav = BotController.get().statusJson();
 		moving = nav.has("active") && nav.get("active").getAsBoolean();
 		if (moving && stillTicks > STUCK_TICKS) {
-			add(found, "stuck", 1, "action_cancel",
-					"walk running but no progress for " + stillTicks + " ticks", null);
+			add(found, "stuck", 1, "walk running but no progress for " + stillTicks + " ticks", null);
 		}
 
 		// Moving with nothing asked for: a current, a piston, an explosion. Worth knowing about,
 		// because it is exactly how a bot gets carried off the thing it just saved itself onto.
 		double drift = p.getDeltaMovement().horizontalDistance();
 		if (!moving && drift > 0.25) {
-			add(found, "carried_along", 1, null, "drifting at " + round(drift) + "/tick with nothing asked", null);
+			add(found, "carried_along", 1, "drifting at " + round(drift) + "/tick with nothing asked", null);
 		}
 
 		// --- report -----------------------------------------------------------------------------
@@ -411,7 +403,6 @@ public final class TaskObserver {
 		now.addProperty("summary", summary(report, h, food));
 
 		prevHealth = h;
-		prevFood = food;
 	}
 
 	/**
@@ -456,10 +447,9 @@ public final class TaskObserver {
 	/**
 	 * Record one anomaly: what is wrong, how bad, the evidence for it, and where the thing that caused it
 	 * is. Deliberately without a remedy: naming a module to call is a judgement, and the facts here are
-	 * what a caller (or a rule it wrote) needs to make one itself. The remedy argument is kept in the
-	 * signature only until the call sites are swept — it is never reported.
+	 * what a caller (or a rule it wrote) needs to make one itself.
 	 */
-	private void add(JsonObject into, String id, int severity, String remedy, String evidence, JsonObject at) {
+	private void add(JsonObject into, String id, int severity, String evidence, JsonObject at) {
 		JsonObject a = new JsonObject();
 		a.addProperty("severity", severity);
 		a.addProperty("evidence", evidence);
@@ -574,7 +564,7 @@ public final class TaskObserver {
 		if (maxHealth > 0.0F && health <= maxHealth * LOW_HEALTH_FRACTION) {
 			return "low_health " + Math.round(health) + "/" + Math.round(maxHealth);
 		}
-		if (air < AIR_ALERT) return "drowning air=" + air + " — action_surface";
+		if (air < AIR_ALERT) return "drowning air=" + air + " — get out of the water";
 		if (air < 240) return "air_low " + air;
 		if (closestThreat <= THREAT_CLOSE && threatCount > 0) {
 			return "hostile_close " + closestThreatName + " " + round(closestThreat) + "b";
@@ -594,7 +584,7 @@ public final class TaskObserver {
 		}
 		if (air < AIR_ALERT) {
 			// Bucketed so the log repeats as it gets worse instead of only once at the threshold.
-			noteOnce("air" + (air / 40), "alert: air " + air + " — surface now");
+			noteOnce("air" + (air / 40), "alert: air " + air + " — underwater, and running out");
 		}
 		if (closestThreat <= THREAT_CLOSE && threatCount > 0) {
 			noteOnce("threat_" + closestThreatName, "alert: " + closestThreatName + " within "
