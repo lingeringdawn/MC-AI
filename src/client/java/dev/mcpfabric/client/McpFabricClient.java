@@ -19,7 +19,10 @@ import dev.mcpfabric.client.handlers.VisionHandlers;
 import dev.mcpfabric.client.tasks.AnomalyResponder;
 import dev.mcpfabric.client.tasks.TaskManager;
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.minecraft.network.chat.Component;
 
 /**
  * The mod's single entrypoint. Everything is client-side by design, so there is no common entrypoint
@@ -80,7 +83,36 @@ public class McpFabricClient implements ClientModInitializer {
 			TaskManager.get().setWatching(McpFabric.config().enableTaskObservation);
 			TaskManager.get().tick(client);
 			AnomalyResponder.get().tick(client, McpFabric.config().autoHandleAnomalies);
+			// While the bot has work, keep the game window in the foreground: the input channel it drives
+			// (held keys, clicks) is only live with an active window and a grabbed mouse.
+			AiControl.tick(client, TaskManager.get().busy() || BotController.get().cameraLocked());
 		});
+
+		// Turn the AI on and off from the chat, without leaving the game: /mcai on | off | status.
+		ClientCommandRegistrationCallback.EVENT.register((dispatcher, access) -> dispatcher.register(
+				ClientCommandManager.literal("mcai")
+						.then(ClientCommandManager.literal("on").executes(ctx -> {
+							AiControl.setEnabled(true);
+							ctx.getSource().sendFeedback(Component.literal(
+									"[mcpfabric] AI on — it may drive, and the window is brought forward while it has work."));
+							return 1;
+						}))
+						.then(ClientCommandManager.literal("off").executes(ctx -> {
+							AiControl.setEnabled(false);
+							ctx.getSource().sendFeedback(Component.literal(
+									"[mcpfabric] AI off — the keyboard and mouse are yours."));
+							return 1;
+						}))
+						.then(ClientCommandManager.literal("status").executes(ctx -> {
+							ctx.getSource().sendFeedback(Component.literal("[mcpfabric] AI is "
+									+ (AiControl.enabled() ? "on" : "off") + "; window "
+									+ (net.minecraft.client.Minecraft.getInstance().isWindowActive() ? "active" : "not active") + ", task "
+									+ (TaskManager.get().busy() ? "running" : "idle") + "."));
+							return 1;
+						}))));
+
+		// Start from the config, so a config that disabled control is not silently overridden.
+		AiControl.setEnabled(McpFabric.config().enablePlayerControl);
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
 			// Keep the event ring buffer's tick stamp in step with the client's own world clock.
 			if (client.level != null) McpFabric.events().setTick(client.level.getGameTime());
