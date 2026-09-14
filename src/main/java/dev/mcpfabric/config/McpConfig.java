@@ -35,6 +35,13 @@ public final class McpConfig {
 	public boolean enableCommands = false;
 	public boolean enablePlayerControl = true;
 	public boolean enableVision = true;
+	/**
+	 * Make the bot's input read as human rather than mechanical: eased mouse-look (fast flick, soft
+	 * settle) instead of constant-rate turning, a short reaction delay before acting, circle-strafing
+	 * and spacing in combat, and a slow gaze drift while standing still. Turn off for deterministic,
+	 * machine-precise motion.
+	 */
+	public boolean enableHumanization = true;
 
 	/**
 	 * Sample the world every tick while a blocking action runs, so callers can see health, nearby

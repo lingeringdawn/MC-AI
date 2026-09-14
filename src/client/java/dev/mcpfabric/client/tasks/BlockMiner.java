@@ -1,6 +1,7 @@
 package dev.mcpfabric.client.tasks;
 
 import dev.mcpfabric.client.BotController;
+import dev.mcpfabric.client.Humanizer;
 import dev.mcpfabric.client.nav.AStarPathfinder;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -37,11 +38,15 @@ final class BlockMiner {
 	private static final double REACH = 4.5;
 	private static final int MAX_REPOSITIONS = 3;
 	private static final int MAX_CLEARS = 3;
+	/** Ticks spent looking at the block before the first swing (see {@link Humanizer}). */
+	private static final int WINDUP_TICKS = 2;
 
 	private final BlockPos pos;
 	private int repositions;
 	private int clears;
 	private BlockPos clearing;
+	/** Ticks the crosshair has rested on the block; models the look-then-swing beat. */
+	private int settleTicks;
 
 	BlockMiner(BlockPos pos) {
 		this.pos = pos;
@@ -69,6 +74,14 @@ final class BlockMiner {
 		// makes the controller keep re-aiming and never press, so wait for the interpolated turn to
 		// arrive (isLookSettled) instead of re-issuing the aim forever.
 		if (!BotController.get().isLookSettled() && BotController.get().lookErrorDeg() > 3.0F) {
+			settleTicks = 0;
+			BotController.get().setAttackHeld(false);
+			return State.WORKING;
+		}
+		// A person looks at the block for a beat before swinging at it; pressing the instant the
+		// crosshair lands reads as a machine.
+		if (Humanizer.enabled() && settleTicks < WINDUP_TICKS) {
+			settleTicks++;
 			BotController.get().setAttackHeld(false);
 			return State.WORKING;
 		}

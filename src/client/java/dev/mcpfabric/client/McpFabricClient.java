@@ -60,6 +60,8 @@ public class McpFabricClient implements ClientModInitializer {
 			TaskManager.get().setAbortOnDanger(McpFabric.config().abortTaskOnDanger);
 			TaskManager.get().tick(client);
 		});
+		// Human-like motion is a live config toggle, so reflect it before the first tick.
+		Humanizer.setEnabled(McpFabric.config().enableHumanization);
 
 		McpFabric.LOGGER.info("[mcpfabric] client handlers registered");
 	}

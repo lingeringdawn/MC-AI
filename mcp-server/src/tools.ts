@@ -67,9 +67,14 @@ const waitSeconds = (maxTimeout: number) =>
     .max(maxTimeout)
     .optional()
     .describe(
-      `Deprecated/optional cap on how long this call blocks before returning state:"running" (0 = return immediately). ` +
-        `Omit to block until the action settles. Either way the result carries an "observe" snapshot of the world ` +
-        `(health, threats, drops, crosshair, progress, rolling log) plus "elapsedMs"/"remainingMs"/"progress".`,
+      `Optional cap on how long this HTTP call blocks before giving up and returning state:"running". ` +
+        `OMIT THIS for short-step composition — the call then returns only once the step has settled, which is what ` +
+        `you want before composing the next step. ` +
+        `Only set it for a long action you intend to poll; note the action keeps running in the background while it ` +
+        `does, so the next action call will fail with "already running" until it settles or you call action_cancel. ` +
+        `If you do set it, make it LARGER than timeoutSeconds or the step gets cut off mid-flight. ` +
+        `Either way the result carries an "observe" snapshot of the world (health, threats, drops, crosshair, ` +
+        `progress, rolling log) plus "elapsedMs"/"remainingMs"/"progress".`,
     );
 
 /** The live-watch payload attached to every action result. */
@@ -704,14 +709,52 @@ export const TOOLS: ToolDef[] = [
   {
     name: "attack",
     method: "action.attack",
-    title: "Fight an entity (blocking)",
+    title: "Fight an entity in short steps (blocking)",
     description:
-      "Client-only, BLOCKING. Walk into reach of an entity and hit it only when the attack cooldown is fully charged (no spam-clicking), swinging the arm. Ends when the target dies, maxSwings is reached, or it can't be reached.",
+      "Client-only, BLOCKING. Fights an entity by composing SHORT steps: each cycle closes the gap (A*) or trades blows once in range, then re-plans against where the target actually is now. " +
+      "Swinging only happens when the attack cooldown is fully charged (no spam-clicking), and while fighting the bot moves like a person — reacts once, circle-strafes, steps back after landing a hit, jumps to crit. " +
+      "The default budget is deliberately short (~10s) so the fight is a series of small, watchable calls rather than one long commit: call it again to continue, or stop and do something else. " +
+      "For full manual control, compose 'approach_entity' and 'swing_at_entity' yourself instead." +
+      OBSERVE_NOTE,
     inputSchema: {
       uuid: z.string().describe("Entity UUID to attack."),
-      maxSwings: z.number().int().min(0).max(500).optional().default(0).describe("Stop after this many hits (0 = until it dies)."),
-      timeoutSeconds: z.number().int().min(1).max(120).optional().default(30),
+      maxSwings: z.number().int().min(0).max(500).optional().default(0).describe("Stop after this many landed hits (0 = keep going until the budget runs out)."),
+      timeoutSeconds: z.number().int().min(1).max(120).optional().default(10),
       waitSeconds: waitSeconds(120),
+    },
+    annotations: WRITE,
+  },
+  {
+    name: "approach_entity",
+    method: "action.approach",
+    title: "Walk into range of an entity (blocking, short)",
+    description:
+      "Client-only, BLOCKING. One short step: walk until the entity is within 'reach' blocks, then return. Re-plans as the target moves instead of committing to a long route. " +
+      "Returns state 'reached' / 'budget' (out of time, call again to keep closing) / 'not_found' / 'no_path'. " +
+      "Compose it with swing_at_entity for full control over a fight, or use 'attack' to have that composed for you." +
+      OBSERVE_NOTE,
+    inputSchema: {
+      uuid: z.string().describe("Entity UUID to approach."),
+      reach: z.number().min(0.5).max(16).optional().default(2.5).describe("Stop when this close to the entity."),
+      timeoutSeconds: z.number().int().min(1).max(60).optional().default(10),
+      waitSeconds: waitSeconds(60),
+    },
+    annotations: WRITE,
+  },
+  {
+    name: "swing_at_entity",
+    method: "action.swing",
+    title: "Hit an entity already in range (blocking, short)",
+    description:
+      "Client-only, BLOCKING. One short step: aim at an entity that is ALREADY within melee range and swing until 'swings' hits land or the step budget runs out. Never walks anywhere. " +
+      "Returns state 'swung' (budget met) / 'killed' / 'out_of_reach' (target moved away — compose an approach_entity step) / 'budget' / 'target_gone'. " +
+      "Moves like a person while fighting: reacts once, circle-strafes, steps back after a hit, jumps to crit. Pair with approach_entity to drive a fight yourself." +
+      OBSERVE_NOTE,
+    inputSchema: {
+      uuid: z.string().describe("Entity UUID to hit."),
+      swings: z.number().int().min(0).max(64).optional().default(1).describe("Stop after this many landed hits (0 = keep swinging for the whole step budget)."),
+      timeoutSeconds: z.number().int().min(1).max(60).optional().default(10),
+      waitSeconds: waitSeconds(60),
     },
     annotations: WRITE,
   },

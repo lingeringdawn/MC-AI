@@ -4,6 +4,7 @@ import com.google.gson.JsonObject;
 import dev.mcpfabric.client.nav.AStarPathfinder;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Options;
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.util.Mth;
@@ -56,8 +57,6 @@ public final class BotController {
 	private boolean surfaceJumpHeld;
 
 	// smooth look (mouse-delta style): interpolate toward a yaw/pitch target each tick
-	private static final float LOOK_STEP_DEG = 20.0F;
-
 	/**
 	 * Look-priority levels. Several subsystems want to point the camera at once (navigation wants the
 	 * next path node, a task wants the block or entity it is working on, an explicit control call
@@ -81,6 +80,40 @@ public final class BotController {
 	/** Rotation the controller last applied — compared with the live rotation to spot real mouse input. */
 	private float lastAppliedYaw = Float.NaN;
 	private float lastAppliedPitch = Float.NaN;
+
+	// idle gaze drift: a person standing still still moves their head a little
+	/** Ticks spent doing nothing at all; drives the sway phase so it always restarts smooth. */
+	private int idleTicks;
+	/** Sway value applied last tick, so only the *change* is added (never accumulates, never fights). */
+	private float swayYaw;
+	private float swayPitch;
+
+	/**
+	 * Sub-degree aim differences are ignored. Every tick the aim point is recomputed from a slightly
+	 * different player position, so chasing it to the last 0.1° renders as a camera that shivers in
+	 * place; a person's hand is nowhere near that precise either.
+	 */
+	private static final float LOOK_DEAD_ZONE = 1.0F;
+	/**
+	 * Walking tolerates a much wider dead zone than aiming does. A couple of degrees off course costs
+	 * nothing while following a path (the next node keeps correcting it), whereas making the camera
+	 * follow the aim point to within a degree while the aim point itself moves every tick is exactly
+	 * what renders as a shivering view.
+	 */
+	private static final float NAV_LOOK_DEAD_ZONE = 3.0F;
+
+	// --- walking ------------------------------------------------------------------------------
+	/** Consider a path node reached once within this horizontal distance, and never back up past it. */
+	private static final double NODE_ARRIVE_HORIZ = 0.9;
+	/** How far ahead (in nodes / blocks) to look when smoothing the grid path into a straight line. */
+	private static final int MAX_LOOKAHEAD_NODES = 8;
+	private static final double MAX_LOOKAHEAD_BLOCKS = 9.0;
+	/** Don't smooth across a height change bigger than this — that leg is a real step, not a zigzag. */
+	private static final double SMOOTH_MAX_DY = 1.2;
+	/** Turn on the spot until the heading is within this many degrees, instead of walking while wrong. */
+	private static final float MOVE_ALIGN_DEG = 60.0F;
+	/** Randomised jump hold, so no two hops are identical. */
+	private final java.util.Random jumpRng = new java.util.Random();
 
 	// --- public control surface (called from handlers, on the render thread) ----------------
 
@@ -259,11 +292,15 @@ public final class BotController {
 
 		synchronized (this) {
 			currentTick++;
-			// Drop a look target nothing refreshed any more (its owner stopped caring), so the next
-			// subsystem to ask is not blocked by a stale latch.
-			if (lookTargetYaw != null && (currentTick - lookRefreshedTick) > LOOK_HOLD_TICKS) {
+			// A navigation/task target that its owner stopped refreshing means the walk or task is
+			// over, so drop it rather than holding the camera hostage. An explicit user look is NOT
+			// dropped here: it is a one-shot request that must survive until the turn actually
+			// arrives, otherwise a large turn would stall part-way and never finish.
+			if (lookTargetYaw != null && lookPriority < LOOK_USER
+					&& (currentTick - lookRefreshedTick) > LOOK_HOLD_TICKS) {
 				lookTargetYaw = null;
 				lookTargetPitch = null;
+				lookPriority = Integer.MIN_VALUE;
 			}
 			// A real player has the controls: drop everything and let them drive.
 			if (HumanControl.suspended()) {
@@ -283,10 +320,22 @@ public final class BotController {
 			}
 			applyWaterSafety(p);
 			// Look is applied last: navigation and the active task have both had their say this tick,
-			// so the winner of the priority arbitration is what actually moves the camera.
+			// so the winner of the priority arbitration is what actually moves the camera. Capture
+			// whether anyone wanted the view *before* applying it, because tickLook releases the
+			// target on arrival and the sway gate below must not mistake that for "nobody cares".
+			boolean lookWanted = lookTargetYaw != null;
 			tickLook(p);
 			boolean driving = fwd || back || left || right || jumpHeld || sneak || sprint
 					|| jumpOnceTicks > 0 || attackHeld || useHeld || path != null;
+			// Nobody is steering or working: drift the view the way a person does instead of freezing
+			// the camera solid. Skipped the moment any owner wants the view.
+			if (!driving && !lookWanted) {
+				applyIdleSway(p);
+			} else {
+				idleTicks = 0;
+				swayYaw = 0.0F;
+				swayPitch = 0.0F;
+			}
 			if (driving) {
 				applyKeys(mc.options);
 				drivingKeys = true;
@@ -331,16 +380,54 @@ public final class BotController {
 		float targetPitch = lookTargetPitch == null ? p.getXRot() : lookTargetPitch;
 		float dYaw = Mth.wrapDegrees(ty - p.getYRot());
 		float dPitch = targetPitch - p.getXRot();
-		// Within one tick's step: snap the rest of the way, so the camera lands exactly on target
-		// instead of stepping past it and having to come back (the classic oscillation).
-		if (Math.abs(dYaw) <= LOOK_STEP_DEG && Math.abs(dPitch) <= LOOK_STEP_DEG) {
-			applyLook(p, ty, targetPitch);
+		// Already close enough: leave the camera exactly where it is. Chasing the last fraction of a
+		// degree makes the view shiver, because the aim point itself moves a little every tick.
+		float dead = lookPriority == LOOK_NAV ? NAV_LOOK_DEAD_ZONE : LOOK_DEAD_ZONE;
+		if (Math.abs(dYaw) <= dead && Math.abs(dPitch) <= dead) {
+			lookTargetYaw = null;
+			lookTargetPitch = null;
+			lookPriority = Integer.MIN_VALUE;
 			return;
 		}
-		// A big turn is stepped toward the target; deliberately do not clear the target here, because
-		// the owner (navigation / the active task) refreshes it every tick anyway.
-		applyLook(p, p.getYRot() + Mth.clamp(dYaw, -LOOK_STEP_DEG, LOOK_STEP_DEG),
-				p.getXRot() + Mth.clamp(dPitch, -LOOK_STEP_DEG, LOOK_STEP_DEG));
+		// Human-style flick: the step scales with the remaining error, so the sweep starts fast and
+		// settles softly instead of panning at one constant speed the whole way. Each axis is handled
+		// separately, and when a step would reach the target we land exactly on it rather than step
+		// past and have to come back (which is what produced the old oscillation).
+		float yawStep = Humanizer.lookStep(dYaw);
+		float pitchStep = Humanizer.lookStep(dPitch);
+		boolean yawDone = Math.abs(dYaw) <= yawStep;
+		boolean pitchDone = Math.abs(dPitch) <= pitchStep;
+		if (yawDone && pitchDone) {
+			applyLook(p, ty, targetPitch);
+			// Arrived: release the view so the latch does not block the next request. Navigation and
+			// the active task re-issue their aim on the next tick anyway.
+			lookTargetYaw = null;
+			lookTargetPitch = null;
+			lookPriority = Integer.MIN_VALUE;
+			return;
+		}
+		float yaw = yawDone ? ty : p.getYRot() + Mth.clamp(dYaw, -yawStep, yawStep);
+		float pitch = pitchDone ? targetPitch : p.getXRot() + Mth.clamp(dPitch, -pitchStep, pitchStep);
+		applyLook(p, yaw, pitch);
+	}
+
+	/**
+	 * Drift the view a fraction of a degree at a time while the bot is idle, so a standing player is
+	 * not a locked-off camera. Only the <em>change</em> in the sway curve is added to the live
+	 * rotation: that way real mouse input is never fought and no offset accumulates, and when the
+	 * sway stops the view simply stays where it is.
+	 */
+	private void applyIdleSway(LocalPlayer p) {
+		idleTicks++;
+		float seconds = idleTicks / 20.0F;
+		float yawSway = Humanizer.idleSway(seconds, 1.6F, 0.35F, 0.0F);
+		float pitchSway = Humanizer.idleSway(seconds, 0.8F, 0.27F, 1.3F);
+		float dYaw = yawSway - swayYaw;
+		float dPitch = pitchSway - swayPitch;
+		swayYaw = yawSway;
+		swayPitch = pitchSway;
+		if (dYaw == 0.0F && dPitch == 0.0F) return;
+		applyLook(p, p.getYRot() + dYaw, Mth.clamp(p.getXRot() + dPitch, -90.0F, 90.0F));
 	}
 
 	private void applyLook(LocalPlayer p, float yaw, float pitch) {
@@ -370,72 +457,108 @@ public final class BotController {
 			return;
 		}
 
+		// Advance monotonically to the first node we have not reached yet, and aim at that one.
+		//
+		// Monotonic is the whole point. Picking "the next node" from a bare distance threshold (look
+		// one node ahead below 0.7, otherwise at the current node) had no hysteresis, so while the
+		// player hovered around that distance the aim flicked between two neighbouring nodes every
+		// tick. When those two nodes lie in different directions the camera visibly trembles, and the
+		// walking direction flips with it. Once a node is behind us it stays behind us.
+		int idx = pathIndex;
+		while (idx < path.size() - 1 && horizOf(p, path.get(idx)) < NODE_ARRIVE_HORIZ) {
+			idx++;
+		}
+		pathIndex = idx;
+
+		// Smooth the grid path: walk to the furthest node we can reach in a straight line rather than
+		// to the very next one. A 4-direction A* route is a staircase wherever it runs diagonally, so
+		// following it node by node would mean a 90 degree turn at every single step — which reads as
+		// stop-start, zig-zag walking. Aiming at the furthest visible node turns that staircase back
+		// into the straight diagonal a person would actually walk, and keeps the heading steady.
+		double feetY = p.getY();
+		int limit = Math.min(path.size() - 1, pathIndex + MAX_LOOKAHEAD_NODES);
+		for (int k = pathIndex + 1; k <= limit; k++) {
+			BlockPos cand = path.get(k);
+			if (Math.abs(cand.getY() - feetY) > SMOOTH_MAX_DY) break;
+			if (horizOf(p, cand) > MAX_LOOKAHEAD_BLOCKS) break;
+			if (!straightWalkable(mc.level, p, cand)) break;
+			pathIndex = k;
+		}
+
 		BlockPos node = path.get(pathIndex);
 
-		// Aim at the next node we have not reached yet. Aiming straight at the node currently under our
-		// feet gives a near-zero direction vector, whose yaw flips wildly tick to tick — that is one of
-		// the ways the camera ended up whipping around. Look one node ahead whenever the immediate node
-		// is already underfoot, and fall back to the nav target if the node still gives no direction.
-		BlockPos aimNode = node;
-		if (horizOf(p, node) < 0.7 && pathIndex + 1 < path.size()) {
-			aimNode = path.get(pathIndex + 1);
-		}
-		double dx = aimNode.getX() + 0.5 - p.getX();
-		double dz = aimNode.getZ() + 0.5 - p.getZ();
+		double dx = node.getX() + 0.5 - p.getX();
+		double dz = node.getZ() + 0.5 - p.getZ();
 		double horiz = Math.sqrt(dx * dx + dz * dz);
 		if (horiz < 0.05) {
+			// Only the final node can be underfoot now. Fall back to the nav target so the heading is
+			// never derived from a zero-length vector, whose yaw flips every tick.
 			dx = navTarget.getX() + 0.5 - p.getX();
 			dz = navTarget.getZ() + 0.5 - p.getZ();
 			horiz = Math.sqrt(dx * dx + dz * dz);
 		}
 
 		boolean inWater = p.isInWater();
-
-		// Sprint like a player does: over a longer haul, and always in water — sprinting is exactly
-		// what puts the player into the swimming pose, so disabling it there makes them crawl.
-		sprint = navSprint || inWater || p.position().distanceTo(Vec3.atBottomCenterOf(navTarget)) > 4.0;
-		if (sneak) sprint = false;
-
+		float yawErr = 180.0F;
 		if (horiz >= 0.05) {
 			float yaw = (float) (Mth.atan2(dz, dx) * (180.0 / Math.PI)) - 90.0F;
+			yawErr = Math.abs(Mth.wrapDegrees(yaw - p.getYRot()));
 			if (inWater) {
 				// Look along the path including up/down, so swimming can descend to a submerged node.
-				double dyNode = (aimNode.getY() + 0.5) - p.getEyeY();
+				double dyNode = (node.getY() + 0.5) - p.getEyeY();
 				float pitch = (float) (-(Mth.atan2(dyNode, Math.max(horiz, 0.01)) * (180.0 / Math.PI)));
 				lookAtTarget(yaw, Mth.clamp(pitch, -70.0F, 45.0F), LOOK_NAV);
 			} else {
-				// Only flatten the pitch for level walking; on a multi-level path keep some of the
-				// vertical info so the camera does not snap between headings at a step.
 				lookAtTarget(yaw, 0.0F, LOOK_NAV);
 			}
 		}
 
-		fwd = true;
+		// Turn first, walk after — the way a person does. Pressing forward while still facing the wrong
+		// way makes the bot travel along an arc, and when the path nearly doubles back that arc becomes
+		// a full circle around the node it is trying to reach. Standing still for the couple of ticks a
+		// big turn takes costs almost nothing and is what actually makes the walk follow the path.
+		boolean facing = yawErr <= MOVE_ALIGN_DEG;
+
+		// Sprint like a player does: over a longer haul, and always in water — sprinting is exactly
+		// what puts the player into the swimming pose, so disabling it there makes them crawl. Never
+		// sprint through a sharp turn: it only widens the arc.
+		sprint = (navSprint || inWater || p.position().distanceTo(Vec3.atBottomCenterOf(navTarget)) > 4.0)
+				&& (facing || inWater);
+		if (sneak) sprint = false;
+
+		fwd = facing;
 		back = left = right = false;
 
-		// Stroke upward when the next node is higher, or to keep the head at the surface on a level
-		// swim. When the node is below, do NOT jump — that is how the bot dives to it.
-		boolean needHeight = node.getY() > p.getY() + 0.4;
-		boolean descending = node.getY() < p.getY() - 0.4;
-		if (inWater) {
-			if (needHeight || (p.isUnderWater() && !descending)) {
-				jumpOnceTicks = Math.max(jumpOnceTicks, 1);
+		// Jump like a person: only from the ground, only once facing the way we are going, only for a
+		// real step up, and hold the key long enough to actually clear the block. The old one-tick tap
+		// produced a stunted hop that usually fell short, so the bot re-jumped on the spot instead of
+		// climbing — which is what read as "unnatural".
+		if (p.onGround() && facing) {
+			boolean needHeight = node.getY() > p.getY() + 0.5;
+			boolean descending = node.getY() < p.getY() - 0.4;
+			if (inWater) {
+				// Stroke upward to climb, or to keep the head at the surface on a level swim. When the
+				// node is below, do NOT jump — that is how the bot dives to it.
+				if (needHeight || (p.isUnderWater() && !descending)) {
+					jumpOnceTicks = Math.max(jumpOnceTicks, Humanizer.ticks(jumpRng, 3, 6));
+				}
+			} else if (needHeight) {
+				jumpOnceTicks = Math.max(jumpOnceTicks, Humanizer.ticks(jumpRng, 3, 6));
 			}
-		} else if (needHeight) {
-			jumpOnceTicks = Math.max(jumpOnceTicks, 1);
-		}
-		if (horiz < 0.55) {
-			pathIndex++;
 		}
 
-		// Stuck recovery ladder: hop -> re-plan -> give up.
-		if (dist < lastDist - 0.02) {
+		// Stuck recovery ladder: hop -> re-plan -> give up. Nothing counts as stuck while we are still
+		// turning on the spot, or every sharp corner would register as being wedged.
+		if (!facing) {
+			stuckTicks = 0;
+			lastDist = Double.MAX_VALUE;
+		} else if (dist < lastDist - 0.02) {
 			stuckTicks = 0;
 			lastDist = dist;
 		} else {
 			stuckTicks++;
 			if (stuckTicks == 15 || stuckTicks == 30) {
-				jumpOnceTicks = Math.max(jumpOnceTicks, 2);
+				jumpOnceTicks = Math.max(jumpOnceTicks, 4);
 			} else if (stuckTicks == 50) {
 				repath(mc, p);
 				stuckTicks = 0;
@@ -444,6 +567,39 @@ public final class BotController {
 				stopNavigationInternal("stuck");
 			}
 		}
+	}
+
+	private static boolean passable(ClientLevel level, BlockPos pos) {
+		return level.getBlockState(pos).getCollisionShape(level, pos).isEmpty();
+	}
+
+	private static boolean solid(ClientLevel level, BlockPos pos) {
+		return !passable(level, pos);
+	}
+
+	/**
+	 * Can the player walk in a straight horizontal line to {@code node} without hitting anything and
+	 * without crossing a hole? This is what lets the follower skip the staircase nodes of a grid path
+	 * safely: it only ever cuts a corner it can actually walk through.
+	 */
+	private static boolean straightWalkable(ClientLevel level, LocalPlayer p, BlockPos node) {
+		double sx = p.getX();
+		double sz = p.getZ();
+		double dx = (node.getX() + 0.5) - sx;
+		double dz = (node.getZ() + 0.5) - sz;
+		double len = Math.sqrt(dx * dx + dz * dz);
+		if (len < 0.3) return true;
+		int feetY = node.getY();
+		int samples = (int) Math.ceil(len / 0.5);
+		for (int i = 1; i <= samples; i++) {
+			double t = (double) i / samples;
+			BlockPos feet = new BlockPos(Mth.floor(sx + dx * t), feetY, Mth.floor(sz + dz * t));
+			if (!passable(level, feet)) return false;
+			if (!passable(level, feet.above())) return false;
+			// Ground must be under every sample, so a "shortcut" never walks over a hole.
+			if (!solid(level, feet.below())) return false;
+		}
+		return true;
 	}
 
 	/** Horizontal distance from the player to a block's centre. */
