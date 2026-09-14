@@ -57,6 +57,17 @@ public final class PlanTask extends ClientTask {
 
 	public PlanTask(RpcRouter router, JsonArray rawSteps, boolean continueOnFailure,
 			double abortHealthBelow, int abortAirBelow, boolean abortIfDead) throws RpcException {
+		this(router, rawSteps, continueOnFailure, abortHealthBelow, abortAirBelow, abortIfDead, 0, null);
+	}
+
+	/**
+	 * Resume a plan that was parked. {@code startIndex} is the step to run — the one that was interrupted,
+	 * redone from the top, because a step half done is not a step done — and {@code priorLog} keeps what
+	 * the earlier steps reported so the resumed run still tells the whole story.
+	 */
+	public PlanTask(RpcRouter router, JsonArray rawSteps, boolean continueOnFailure,
+			double abortHealthBelow, int abortAirBelow, boolean abortIfDead, int startIndex, JsonArray priorLog)
+			throws RpcException {
 		this.router = router;
 		this.continueOnFailure = continueOnFailure;
 		this.abortHealthBelow = abortHealthBelow;
@@ -93,6 +104,30 @@ public final class PlanTask extends ClientTask {
 			}
 			steps.add(step);
 		}
+		this.index = Math.max(0, Math.min(startIndex, steps.size()));
+		if (priorLog != null) this.log.addAll(priorLog);
+	}
+
+	/**
+	 * Where this plan had got to, as the caller's own data: the steps as given, the guards, the cursor and
+	 * what the finished steps reported. Opaque to everything else, which is what lets the cursor and the
+	 * guards travel together instead of being re-supplied from memory.
+	 */
+	@Override
+	public JsonObject parkSnapshot() {
+		JsonObject o = new JsonObject();
+		JsonArray raw = new JsonArray();
+		for (JsonObject s : steps) raw.add(s.deepCopy());
+		o.add("steps", raw);
+		o.addProperty("continueOnFailure", continueOnFailure);
+		o.addProperty("abortIfHealthBelow", abortHealthBelow);
+		o.addProperty("abortIfAirBelow", abortAirBelow);
+		o.addProperty("abortIfDead", abortIfDead);
+		// The step to run next, not the last one finished: an interrupted step is redone.
+		o.addProperty("index", Math.min(index, steps.size()));
+		o.add("log", log.deepCopy());
+		o.addProperty("describe", describe());
+		return o;
 	}
 
 	@Override

@@ -43,15 +43,24 @@ public final class TaskManager {
 		Minecraft mc = Minecraft.getInstance();
 		ClientTask previous = current;
 		String superseded = null;
+		String parked = null;
 		if (previous != null && !previous.isDone()) {
 			superseded = previous.describe();
+			// Snapshot before cancelling. Taking over is usually a correction rather than a decision that
+			// the rest of the work was pointless, so a task that can say where it had got to gets parked
+			// rather than discarded — the caller can carry on from there with plan_resume.
+			JsonObject snap = previous.parkSnapshot();
 			try {
 				previous.onCancel(mc);
 			} catch (Throwable ignored) {
 				// best effort: a superseded task gets no say in the matter
 			}
 			previous.stampCancelled("superseded by " + task.describe());
-			observer.note("superseded " + superseded);
+			if (snap != null) {
+				ParkedPlan.put(snap, task.describe(), superseded);
+				parked = superseded;
+			}
+			observer.note("superseded " + superseded + (parked != null ? " (parked at its current step)" : ""));
 		}
 		current = task;
 		observer.begin(task);
@@ -63,11 +72,16 @@ public final class TaskManager {
 		o.addProperty("active", true);
 		o.addProperty("task", task.describe());
 		o.addProperty("deadlineMs", task.remainingMsLeft());
-		o.addProperty("note", superseded == null
+		String note = superseded == null
 				? "Started. Nothing waits for it: watch it with action.status / observe, send any other "
 						+ "action to take over, or action.cancel to stop it."
-				: "Replaced '" + superseded + "', which was still running. Same controls apply to this one.");
-		if (superseded != null) o.addProperty("superseded", superseded);
+				: "Replaced '" + superseded + "', which was still running. Same controls apply to this one.";
+		if (parked != null) {
+			note += " It was not lost: it is parked at the step it had reached — plan_status shows where, "
+					+ "plan_resume carries on from there.";
+			o.addProperty("parked", parked);
+		}
+		o.addProperty("note", note);
 		addObservation(o);
 		return o;
 	}
@@ -147,13 +161,17 @@ public final class TaskManager {
 	public synchronized void cancel(Minecraft mc) {
 		ClientTask t = current;
 		if (t == null || t.isDone()) return;
+		// Same reasoning as being superseded: stopping a plan is usually "not now", not "never", so the
+		// remainder is parked on the way out. Nothing resumes it by itself.
+		JsonObject snap = t.parkSnapshot();
 		try {
 			t.onCancel(mc);
 		} catch (Throwable ignored) {
 			// best effort
 		}
 		t.stampCancelled("cancelled on request");
-		observer.note("cancelled " + t.describe());
+		if (snap != null) ParkedPlan.put(snap, "action.cancel", t.describe());
+		observer.note("cancelled " + t.describe() + (snap != null ? " (parked at its current step)" : ""));
 	}
 
 	public JsonObject status() {

@@ -79,6 +79,18 @@ public abstract class ClientTask {
 	/** Called on the game thread when the task is cancelled. */
 	public void onCancel(Minecraft mc) {}
 
+	/**
+	 * Everything needed to pick this task up where it left off, or null when picking it up is meaningless.
+	 *
+	 * <p>A single physical act (walk there, dig that) has no "where it left off" — it either happened or
+	 * it did not — so the default is null and {@link TaskManager} simply lets it go. A task made of steps
+	 * does have one, and handing it over here is what lets an interruption park the remainder instead of
+	 * throwing it away. The snapshot is opaque to everything except the task that produced it.
+	 */
+	public JsonObject parkSnapshot() {
+		return null;
+	}
+
 	// --- completion helpers (game thread) ----------------------------------------------------
 
 	protected final void done(String detail) {

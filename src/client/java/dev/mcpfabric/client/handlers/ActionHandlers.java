@@ -16,6 +16,7 @@ import dev.mcpfabric.client.tasks.ClientTask;
 import dev.mcpfabric.client.tasks.CraftTask;
 import dev.mcpfabric.client.tasks.DigTask;
 import dev.mcpfabric.client.tasks.MoveToTask;
+import dev.mcpfabric.client.tasks.ParkedPlan;
 import dev.mcpfabric.client.tasks.PlanTask;
 import dev.mcpfabric.client.tasks.Rules;
 import dev.mcpfabric.client.tasks.TaskManager;
@@ -61,6 +62,7 @@ public final class ActionHandlers {
 		}
 
 		registerPlan(router);
+		registerParkedPlan(router);
 
 		// The caller's own reflexes. The mod supplies the loop and nothing else: the conditions and the
 		// actions are the caller's sentences, replaced wholesale by the next rules.set, and every firing
@@ -91,7 +93,16 @@ public final class ActionHandlers {
 
 		router.register("action.cancel", ctx -> ClientMc.call(() -> {
 			TaskManager.get().cancel(ClientMc.mc());
-			return Json.ok("cancelled");
+			JsonObject o = Json.ok("cancelled");
+			// A cancelled plan parks itself on the way out, so say so: otherwise nothing tells the caller
+			// the flow it just stopped is still there to carry on from.
+			JsonObject parked = ParkedPlan.status();
+			if (parked.has("parked") && parked.get("parked").getAsBoolean()) {
+				o.addProperty("parked", parked.get("describe").getAsString());
+				o.addProperty("resumeNote", "It is parked at the step it had reached: plan_status for where, "
+						+ "plan_resume to carry on, plan_discard to throw it away.");
+			}
+			return o;
 		}));
 	}
 
@@ -102,6 +113,58 @@ public final class ActionHandlers {
 		router.register("action.do", ctx -> run(ctx,
 				ctx2 -> plan(router, ctx2.params()),
 				ctx.optInt("timeoutSeconds", 120)));
+	}
+
+	/**
+	 * The parked plan: see where it stopped, carry on from there, or throw it away.
+	 *
+	 * <p>Being taken over used to end a plan, which made a mid-flow correction expensive — the caller had
+	 * to re-issue every step from the top, in a world that had moved on. Now the remainder is parked, and
+	 * these three calls are the whole interface to it. Nothing resumes a plan on its own: whether to carry
+	 * on is exactly the kind of decision that belongs to the caller.
+	 */
+	private static void registerParkedPlan(RpcRouter router) {
+		router.register("plan.status", ctx -> ClientMc.call(() -> {
+			JsonObject o = ParkedPlan.status();
+			JsonObject running = new JsonObject();
+			ClientTask t = TaskManager.get().current();
+			boolean active = TaskManager.get().busy() && t != null;
+			running.addProperty("active", active);
+			if (active) {
+				running.addProperty("task", t.describe());
+				JsonObject progress = t.progress();
+				if (progress != null && progress.size() > 0) running.add("progress", progress);
+			}
+			o.add("running", running);
+			return o;
+		}));
+
+		router.register("plan.resume", ctx -> ClientMc.call(() -> {
+			requireControl();
+			JsonObject snap = ParkedPlan.get();
+			if (snap == null) {
+				throw RpcException.unavailable("Nothing is parked. A plan parks itself when another "
+						+ "instruction takes over while it runs, or when it is cancelled.");
+			}
+			int from = snap.has("index") ? snap.get("index").getAsInt() : 0;
+			PlanTask plan = new PlanTask(router, snap.getAsJsonArray("steps"),
+					snap.has("continueOnFailure") && snap.get("continueOnFailure").getAsBoolean(),
+					snap.has("abortIfHealthBelow") ? snap.get("abortIfHealthBelow").getAsDouble() : 0.0,
+					snap.has("abortIfAirBelow") ? snap.get("abortIfAirBelow").getAsInt() : 0,
+					snap.has("abortIfDead") && snap.get("abortIfDead").getAsBoolean(),
+					from, snap.has("log") ? snap.getAsJsonArray("log") : null);
+			int secs = Math.max(1, Math.min(600, ctx.optInt("timeoutSeconds", 120)));
+			plan.setDeadline(secs * 1000L);
+			// Clear before submitting: if this resume takes over something that is running, that task parks
+			// itself on the way out and must find the slot free, not be wiped by the one it replaced.
+			ParkedPlan.clear();
+			JsonObject o = TaskManager.get().submit(plan);
+			o.addProperty("resumedFrom", from);
+			o.addProperty("resumedSteps", plan.describe());
+			return o;
+		}));
+
+		router.register("plan.discard", ctx -> ParkedPlan.clear());
 	}
 
 	static ClientTask plan(RpcRouter router, JsonObject p) throws RpcException {
@@ -170,6 +233,11 @@ public final class ActionHandlers {
 		o.addProperty("watchStream", "action.observe {sinceSeq} returns newEvents since that seq; "
 				+ "now.visible is what the eye can see on this tick.");
 		o.addProperty("planLimit", MAX_PLAN_STEPS);
+		o.addProperty("planHandle", "A plan that is taken over or cancelled is PARKED, not lost: plan.status "
+				+ "shows where it stopped (its next step), plan.resume carries on from that step, plan.discard "
+				+ "throws it away. The interrupted step is redone from the top — it may have been half "
+				+ "finished. Nothing resumes a plan on its own; that decision is yours. One slot only: this is "
+				+ "'the plan I was in the middle of', not a queue.");
 		o.addProperty("rules", "rules.set replaces the whole set; rules.list shows it; each firing is "
 				+ "reported in the stream as an event with kind 'rule'.");
 		o.addProperty("noPolicy", "None of these modules decides anything. Each does the one physical thing "

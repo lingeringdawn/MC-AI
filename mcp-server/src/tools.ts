@@ -722,7 +722,13 @@ export const TOOLS: ToolDef[] = [
       'It is not a behaviour and knows nothing about trees or mobs: it runs exactly the steps you list, in the order you list them, and reports each one. A step is either {"action":"<module>", ...its params} for the multi-tick modules (moveTo, dig, attack, useFor, craft — same parameters as calling them directly), or {"rpc":"<any method>", ...its params} fired inline (inventory.selectHotbar, interact.placeBlock, control.lookAt, ui.clickSlot, control.setInput...). ' +
       'Because a module step is built when its turn comes, it may aim at a symbolic target: {"action":"moveTo","target":"nearest_drop"} resolves against the world AFTER the steps before it ran. ' +
       "Stop conditions are yours to declare, in guard: abortIfHealthBelow / abortIfAirBelow / abortIfDead end the run early and hand control straight back. A plan runs unattended for tens of seconds, so declare them rather than hoping. onFailure:'stop' (default) ends the run when a step fails, 'continue' presses on, and one step can be marked optional. " +
-      "Comes back as soon as the plan is in charge, with a note and a first observe snapshot. Follow it with action_status: progress.completed / progress.total and progress.steps show which step is running and how the finished ones went, and progress.phase is that step's own live detail. To change course mid-flight, just submit another action or another plan — it supersedes this one on the next tick — or call action_cancel. A guard tripping, a failed step (with onFailure:'stop') or the plan's own budget ends the plan by itself and reports stoppedBy." +
+      "Comes back as soon as the plan is in charge, with a note and a first observe snapshot. Follow it with action_status: progress.completed / progress.total and progress.steps show which step is running and how the finished ones went, and progress.phase is that step's own live detail. To change course mid-flight, just submit another action or another plan — it supersedes this one on the next tick — or call action_cancel. A guard tripping, a failed step (with onFailure:'stop') or the plan's own budget ends the plan by itself and reports stoppedBy.\n" +
+      "AND IT IS NOT LOST WHEN YOU INTERRUPT IT: a plan that is taken over or cancelled is PARKED at the " +
+      "step it had reached, so a mid-flow correction (\"stop, eat first\") costs you nothing. plan_status " +
+      "shows where it stopped, plan_resume carries on from that step, plan_discard throws it away. The " +
+      "interrupted step is redone from the top — it may have been half finished. Nothing resumes it on its " +
+      "own: whether to carry on is your call, and there is one parked slot (the plan you were in the " +
+      "middle of), not a queue." +
       OBSERVE_NOTE,
     inputSchema: {
       steps: z
@@ -781,6 +787,45 @@ export const TOOLS: ToolDef[] = [
       timeoutSeconds: z.number().int().min(1).max(600).optional().default(120).describe("Budget for the whole plan."),
       waitSeconds: waitSeconds(600),
     },
+    annotations: WRITE,
+  },
+
+  {
+    name: "plan_status",
+    method: "plan.status",
+    title: "Where the interrupted plan stopped",
+    description:
+      "Client-only, READ-ONLY. Two things: what is running right now, and the plan that was parked when " +
+      "something took over or cancelled it — with the step it will run next and what the finished steps " +
+      "reported. Read this after interrupting a plan, before deciding whether to carry on. A plan with a " +
+      "single physical act (a walk, a dig) has no 'where it left off' and parks nothing.",
+    inputSchema: {},
+    annotations: READ,
+  },
+  {
+    name: "plan_resume",
+    method: "plan.resume",
+    title: "Carry on the interrupted plan",
+    description:
+      "Client-only. Pick the parked plan up at the step it was interrupted on, guards and all, and run the " +
+      "rest as one plan again — so a nine-step flow you corrected halfway costs you the correction, not the " +
+      "nine steps. The interrupted step is redone from the top, which matters for a step that was half " +
+      "finished (a dig three ticks into a block). Errors if nothing is parked. If something is running it " +
+      "is taken over in turn, and that task parks itself if it can.",
+    inputSchema: {
+      timeoutSeconds: z.number().int().min(1).max(600).optional().default(120).describe("Budget for the rest of the plan."),
+    },
+    annotations: WRITE,
+  },
+  {
+    name: "plan_discard",
+    method: "plan.discard",
+    title: "Throw the parked plan away",
+    description:
+      "Client-only. Forget the parked plan, so its remaining steps are never resumed. Use it when the " +
+      "situation has changed enough that carrying on is the wrong idea — the other half of 'parked, not " +
+      "lost' is being able to decide you do not want it after all.",
+    inputSchema: {},
     annotations: WRITE,
   },
 
