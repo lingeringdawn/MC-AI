@@ -8,6 +8,7 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.item.ItemEntity;
@@ -245,8 +246,23 @@ public final class TaskObserver {
 
 		float lost = prevHealth - h;
 		if (h > 0.0F && lost >= 0.5F) {
-			add(found, "taking_damage", lost >= 4.0F ? 2 : 1, null,
-					"lost " + round(lost) + " health since the last sample", null);
+			// Say who did it, not merely that it happened. "Lost 2 health" leaves the caller unable to
+			// tell a zombie in melee range from a fall off a ledge, and those want opposite answers — and
+			// a caller that cannot see the attacker will keep restarting the task the attacker keeps
+			// interrupting. The damage source knows who; the position and id come with it so the remedy
+			// can be aimed without another lookup.
+			Entity attacker = attackerOf(p);
+			String remedy = null;
+			if (attacker != null) {
+				remedy = h <= maxHealth * LOW_HEALTH_FRACTION ? "retreat_from" : "swing_at_entity";
+			}
+			add(found, "taking_damage", attacker != null ? 2 : (lost >= 4.0F ? 2 : 1), remedy,
+					(attacker == null
+							? "took damage from the world, not a creature"
+							: attacker.getName().getString() + " hit me, " + round(p.distanceTo(attacker))
+									+ " blocks away")
+							+ " — lost " + round(lost) + " health",
+					attacker == null ? null : entityRef(attacker));
 		}
 
 		if (p.isUnderWater()) {
@@ -458,6 +474,29 @@ public final class TaskObserver {
 		if (!now.has("threats") || !now.get("threats").isJsonArray()) return null;
 		JsonArray t = now.getAsJsonArray("threats");
 		return t.isEmpty() ? null : t.get(0).getAsJsonObject();
+	}
+
+	/**
+	 * Whoever last hurt the player. The damage source records the attacker (the shooter for an arrow, the
+	 * mob for a bite); the world itself — falling, drowning, fire — leaves no entity, and that difference
+	 * is reported rather than hidden.
+	 */
+	private static Entity attackerOf(LocalPlayer p) {
+		DamageSource source = p.getLastDamageSource();
+		if (source == null) return null;
+		Entity attacker = source.getEntity() != null ? source.getEntity() : source.getDirectEntity();
+		return attacker == null || attacker == p ? null : attacker;
+	}
+
+	/** Where an attacker is, plus what to call it, so a remedy can be aimed without another query. */
+	private static JsonObject entityRef(Entity e) {
+		JsonObject o = new JsonObject();
+		o.addProperty("uuid", e.getUUID().toString());
+		o.addProperty("name", e.getName().getString());
+		o.addProperty("x", round(e.getX()));
+		o.addProperty("y", round(e.getY()));
+		o.addProperty("z", round(e.getZ()));
+		return o;
 	}
 
 	/** The worst anomaly from the latest sample, or null when nothing is wrong. */

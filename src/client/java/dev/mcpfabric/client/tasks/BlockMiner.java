@@ -1,13 +1,14 @@
 package dev.mcpfabric.client.tasks;
 
+import com.mojang.blaze3d.platform.InputConstants;
 import dev.mcpfabric.client.BotController;
 import dev.mcpfabric.client.Humanizer;
 import dev.mcpfabric.client.nav.AStarPathfinder;
+import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
@@ -111,6 +112,9 @@ final class BlockMiner {
 		// than an angle threshold — a threshold can stay unsatisfied for as long as the aim is still
 		// turning, and then the dig never starts at all, which is how a miner can sit on a block for its
 		// entire budget without ever taking a swing at it.
+		// Digging stays tied to the crosshair, deliberately: the break only counts while the view is
+		// actually on the block, so when something knocks the aim off, stopping is the correct answer
+		// rather than pushing a break the game is no longer tracking.
 		if (!crosshairOn(mc, pos)) {
 			settleTicks = 0;
 			stopDigging();
@@ -196,20 +200,19 @@ final class BlockMiner {
 	 * progressed and finished by exactly the code that runs when a player holds the button.
 	 */
 	private void dig(Minecraft mc, BlockPos target) {
-		// The controller applies this to the real key every tick, so the button stays down and vanilla's
-		// own held-button branch is what carries the break on from here.
+		// Through the real input channel and nothing else: the real attack binding held down, plus one
+		// genuine click notification per block — the same call the mouse handler makes when a player
+		// clicks. Vanilla's own input handling then starts the break and carries it on, so what the server
+		// sees is a player's break: it agrees to it, and the block drops what it should.
+		//
+		// Reaching into gameMode.startDestroyBlock/continueDestroyBlock instead is a back door, and it
+		// showed: the block vanished while no wood appeared on the ground, because the break was never the
+		// one the server had agreed to. The channel is not a stylistic preference here, it is what makes
+		// the break real.
 		BotController.get().setAttackHeld(true);
 		if (!target.equals(digging)) {
 			digging = target.immutable();
-			// One press edge per block, and this is the only part done by hand: it is the same call
-			// vanilla's startAttack() makes on a real left click. Holding the key alone does not start a
-			// break (with the button merely down, the attack just reads as held and the destroy progress
-			// never leaves zero), and calling continueDestroyBlock ourselves produced a break the server
-			// never agreed to — the block went, the drops did not. Start by hand, continue by vanilla.
-			Direction face = mc.hitResult instanceof BlockHitResult hit && hit.getType() == HitResult.Type.BLOCK
-					? hit.getDirection() : Direction.UP;
-			mc.gameMode.startDestroyBlock(target, face);
-			mc.options.keyAttack.setDown(true);
+			KeyMapping.click(InputConstants.Type.MOUSE.getOrCreate(0));
 		}
 	}
 

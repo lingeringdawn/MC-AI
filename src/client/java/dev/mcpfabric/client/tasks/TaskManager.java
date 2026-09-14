@@ -76,6 +76,12 @@ public final class TaskManager {
 		return current;
 	}
 
+	/** True while a task is in charge — i.e. the bot is actively doing something. */
+	public boolean busy() {
+		ClientTask t = current;
+		return t != null && !t.isDone();
+	}
+
 	/** The live observation of the running task (never null). */
 	public TaskObserver observer() {
 		return observer;

@@ -3,6 +3,7 @@ package dev.mcpfabric.client;
 import com.google.gson.JsonObject;
 import dev.mcpfabric.McpFabric;
 import dev.mcpfabric.client.nav.AStarPathfinder;
+import dev.mcpfabric.client.tasks.TaskManager;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Options;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -415,7 +416,16 @@ public final class BotController {
 			// actively unhelpful mid-aim: a hand resting on the mouse would drag the view off the block
 			// being mined or the mob being hit, and the bot would look like it was fighting its own
 			// controls. The AI's camera is re-applied last, so what it aimed at is where the view stays.
-			if (cameraLocked()) applyLook(p, lastAppliedYaw, lastAppliedPitch);
+			boolean locked = cameraLocked();
+			if (locked) applyLook(p, lastAppliedYaw, lastAppliedPitch);
+			// The bot holds the mouse for as long as it has anything on — a task in charge, or inputs it is
+			// driving itself. The real input channel is dead without the grab (handleKeybinds passes
+			// continueAttack(false) when the mouse is not grabbed, and that skips digging entirely), so the
+			// grab is what makes the bot's held keys and clicks count as a player's. Once it has the
+			// channel it keeps it: nothing here ever releases the mouse.
+			if (!mc.mouseHandler.isMouseGrabbed() && (locked || TaskManager.get().busy())) {
+				mc.mouseHandler.grabMouse();
+			}
 			// The caller's own inputs go on last, after the running step and the path follower have had
 			// their say, so a steering correction actually steers instead of being overwritten next tick.
 			applyUserInput();

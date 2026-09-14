@@ -92,6 +92,7 @@ public final class ControlHandlers {
 			BotController b = BotController.get();
 			JsonObject o = new JsonObject();
 			o.addProperty("cameraLocked", b.cameraLocked());
+			o.addProperty("mouseGrabbed", mc.mouseHandler.isMouseGrabbed());
 			o.addProperty("drivingKeys", b.isDrivingKeys());
 			o.addProperty("wantsForward", b.wantsForward());
 			o.addProperty("wantsBack", b.wantsBack());
