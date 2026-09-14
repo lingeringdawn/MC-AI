@@ -38,6 +38,23 @@ const vec3 = () => ({
   z: z.number().describe("Z coordinate (north/south)."),
 });
 
+/**
+ * The caller's shorthand for "that thing", as an alternative to coordinates or a UUID. Resolved on the
+ * mod side against the world at the moment the step runs — which is what lets a plan end with "walk to
+ * the nearest drop" before that drop exists.
+ */
+const TARGET_SPEC =
+  '"nearest_hostile" (closest hostile mob), "nearest_drop" (closest dropped item), ' +
+  '"nearest_animal", "looking_at" (whatever the crosshair is on)';
+
+/** x/y/z or 'target', for the tools that accept either. */
+const goalArgs = () => ({
+  x: z.number().optional().describe("X coordinate. Give x/y/z, or 'target' instead."),
+  y: z.number().optional().describe("Y coordinate. Give x/y/z, or 'target' instead."),
+  z: z.number().optional().describe("Z coordinate. Give x/y/z, or 'target' instead."),
+  target: z.string().optional().describe(`What to aim at, instead of x/y/z: ${TARGET_SPEC}.`),
+});
+
 const dimensionOpt = {
   dimension: z
     .string()
@@ -49,26 +66,18 @@ const READ = { readOnlyHint: true } as const;
 const WRITE = { destructiveHint: true } as const;
 
 /**
- * How long a blocking action's HTTP call waits before returning `state:"running"` so the caller can
- * keep polling. Every blocking action returns a live observation snapshot either way, so a short
- * wait means "watch while it happens" instead of "wait blindly until it is over".
+ * Was "how long this call may block for". Nothing blocks any more, so there is nothing to cap — the
+ * parameter is still accepted so an existing caller does not fail validation, but the mod ignores it
+ * and says so out loud, because a caller who believes it is waiting will wait for something that
+ * already returned.
  */
-const waitSeconds = (maxTimeout: number) =>
+const waitSeconds = (_maxTimeout: number) =>
   z
     .number()
-    .int()
-    .min(0)
-    .max(maxTimeout)
     .optional()
     .describe(
-      `Optional cap on how long this HTTP call blocks before giving up and returning state:"running". ` +
-        `OMIT THIS for short-step composition — the call then returns only once the step has settled, which is what ` +
-        `you want before composing the next step. ` +
-        `Only set it for a long action you intend to poll; note the action keeps running in the background while it ` +
-        `does, so the next action call will fail with "already running" until it settles or you call action_cancel. ` +
-        `If you do set it, make it LARGER than timeoutSeconds or the step gets cut off mid-flight. ` +
-        `Either way the result carries an "observe" snapshot of the world (health, threats, drops, crosshair, ` +
-        `progress, rolling log) plus "elapsedMs"/"remainingMs"/"progress".`,
+      "DEPRECATED AND IGNORED. No action blocks any more: every call returns the moment it is submitted. " +
+        "Watch what it is doing with action_status / observe instead of waiting here.",
     );
 
 /**
@@ -84,14 +93,19 @@ const COMPOSE_NOTE =
   "each one, since felling a trunk exposes the next), then move_to onto the drops so the player picks " +
   "them up, then inventory/craft. Same for a fight: retrieve the mob, move_to into range while it is " +
   "still where you last saw it, swing_at_entity, then re-observe and recompose. Keep each call short, " +
-  "read the world between steps, and change your plan when it no longer matches.";
+  "read the world between steps, and change your plan when it no longer matches. When you already know " +
+  "the sequence, chain the steps in ONE run_plan call instead of one round-trip each; call them " +
+  "separately when you need to look at the world between the steps.";
 
 /** The live-watch payload attached to every action result. */
 const OBSERVE_NOTE =
-  ' The result includes an "observe" snapshot sampled every tick while it ran: vitals, nearby hostiles, drops on the ' +
-  'ground, what the crosshair is on, the task\'s own "progress", and a rolling "log" of notable moments — so the ' +
-  'world is visible during the action instead of only after it. Poll action_status / observe to keep watching, and ' +
-  'read observe.danger (0 fine / 1 caution / 2 act now) to decide whether to action_cancel.';
+  ' NOTHING HERE BLOCKS: the call returns as soon as the action is in charge, and the world keeps ticking ' +
+  'underneath it, so you always keep the last word. Every result carries an "observe" snapshot sampled every tick ' +
+  'while it ran: vitals, nearby hostiles, drops on the ground, what the crosshair is on, the action\'s own ' +
+  '"progress", and a rolling "log" of notable moments — so the world is visible during the action instead of only ' +
+  'after it. Watch with action_status / observe and read observe.danger (0 fine / 1 caution / 2 act now). To change ' +
+  'course you do not need permission or a cancel first: the next action you send supersedes whatever is running, ' +
+  'and action_cancel stops it outright and reports it as cancelled.';
 
 // ----- catalogue ------------------------------------------------------------------------------
 
@@ -649,14 +663,82 @@ export const TOOLS: ToolDef[] = [
 
   // ===== actions (client, blocking) ==========================================================
   {
-    name: "move_to",
-    method: "action.moveTo",
-    title: "Walk to a position (blocking)",
+    name: "run_plan",
+    method: "action.do",
+    title: "Run a plan of steps (returns immediately)",
     description:
-      "Client-only, BLOCKING. Walk the player to within 'reachRadius' of a target and return when the walk settles (reached / no_path / timeout), or earlier if 'waitSeconds' caps the wait." +
+      "Client-only, NON-BLOCKING. Submit a list of steps YOU compose, in order, and return at once — the plan then runs on its own while you keep watching and stay free to overrule it. This is the main way to act smoothly: a whole 'walk over, mine three logs, pick up the drops' flow costs one call instead of four, and the steps run back-to-back on the game thread with nothing drifting in between. " +
+      'It is not a behaviour and knows nothing about trees or mobs: it runs exactly the steps you list, in the order you list them, and reports each one. A step is either {"action":"<module>", ...its params} for the multi-tick modules (moveTo, mineBlock, swing, eat, retreat, surface, mlg, craft — same parameters as calling them directly), or {"rpc":"<any method>", ...its params} fired inline (inventory.selectHotbar, interact.placeBlock, control.lookAt, inventory.swapSlots, action.eat...). ' +
+      'Because a module step is built when its turn comes, it may aim at a symbolic target: {"action":"moveTo","target":"nearest_drop"} resolves against the world AFTER the steps before it ran. ' +
+      "Stop conditions are yours to declare, in guard: abortIfHealthBelow / abortIfAirBelow / abortIfDead end the run early and hand control straight back. A plan runs unattended for tens of seconds, so declare them rather than hoping. onFailure:'stop' (default) ends the run when a step fails, 'continue' presses on, and one step can be marked optional. " +
+      "Comes back as soon as the plan is in charge, with a note and a first observe snapshot. Follow it with action_status: progress.completed / progress.total and progress.steps show which step is running and how the finished ones went, and progress.phase is that step's own live detail. To change course mid-flight, just submit another action or another plan — it supersedes this one on the next tick — or call action_cancel. A guard tripping, a failed step (with onFailure:'stop') or the plan's own budget ends the plan by itself and reports stoppedBy." +
       OBSERVE_NOTE,
     inputSchema: {
-      ...vec3(),
+      steps: z
+        .array(
+          z
+            .object({
+              action: z
+                .string()
+                .optional()
+                .describe(
+                  "A module to run: moveTo, mineBlock, swing, eat, retreat, surface, mlg, craft. Every sibling key is that module's parameter, exactly as if you called it directly.",
+                ),
+              rpc: z
+                .string()
+                .optional()
+                .describe(
+                  'Any other method to fire inline, e.g. "inventory.selectHotbar", "interact.placeBlock", "control.lookAt". Sibling keys are its parameters.',
+                ),
+              optional: z.boolean().optional().describe("If true, a failure in this step does not stop the plan."),
+              timeoutSeconds: z.number().int().min(1).max(300).optional().describe("Budget for this one step."),
+            })
+            .passthrough(),
+        )
+        .min(1)
+        .max(64)
+        .describe("The steps, in order. Give exactly one of 'action' or 'rpc' per step."),
+      onFailure: z
+        .enum(["stop", "continue"])
+        .optional()
+        .default("stop")
+        .describe("What a failed step does: end the plan (default) or carry on to the next one."),
+      guard: z
+        .object({
+          abortIfHealthBelow: z
+            .number()
+            .min(0)
+            .max(20)
+            .optional()
+            .describe("End the plan when health drops below this. 14 is a reasonable 'stop what I am doing' line."),
+          abortIfAirBelow: z
+            .number()
+            .int()
+            .min(0)
+            .max(300)
+            .optional()
+            .describe("End the plan when air drops below this (0-300). 120 leaves about 6 seconds — set it whenever a step might take you under water."),
+          abortIfDead: z.boolean().optional().describe("End the plan if the player dies."),
+        })
+        .optional()
+        .describe("Your own stop conditions for the run. Declare them; do not hope."),
+      timeoutSeconds: z.number().int().min(1).max(600).optional().default(120).describe("Budget for the whole plan."),
+      waitSeconds: waitSeconds(600),
+    },
+    annotations: WRITE,
+  },
+
+  {
+    name: "move_to",
+    method: "action.moveTo",
+    title: "Walk to a position (returns immediately)",
+    description:
+      "Client-only, NON-BLOCKING. Ask the player to walk to within 'reachRadius' of a position; returns as soon as the walk is under way. Follow it with action_status — state 'done' with detail 'reached' (or 'no_path' / 'stuck' / 'timeout') is how it turned out, 'running' means still walking. " +
+      "Give x/y/z, or 'target' for a shorthand (nearest_hostile / nearest_drop / nearest_animal / looking_at) — handy inside a run_plan, where the shorthand resolves after the earlier steps ran. " +
+      "It walks and nothing else: it does not open doors, fight, or pick what to walk to for you." +
+      OBSERVE_NOTE,
+    inputSchema: {
+      ...goalArgs(),
       reachRadius: z.number().min(0).max(16).optional().default(1).describe("Stop when within this many blocks of the target."),
       sprint: z.boolean().optional().default(false),
       timeoutSeconds: z.number().int().min(1).max(120).optional().default(30),
@@ -670,11 +752,11 @@ export const TOOLS: ToolDef[] = [
     title: "Mine a block (blocking)",
     description:
       "Client-only, BLOCKING. One block, start to finish: walk into reach (A*), face it, auto-select the best tool in the hotbar, mine with realistic survival timing, and return when it is gone. Returns state mined / unreachable / timeout. " +
-      "It mines exactly the one block you named — it does not follow a vein or fell a tree for you." +
+      "It mines exactly the one block you named — it does not follow a vein or fell a tree for you. Give x/y/z, or 'target' (e.g. looking_at the log you can see)." +
       COMPOSE_NOTE +
       OBSERVE_NOTE,
     inputSchema: {
-      ...vec3(),
+      ...goalArgs(),
       timeoutSeconds: z.number().int().min(1).max(120).optional().default(30),
       waitSeconds: waitSeconds(120),
     },
@@ -761,10 +843,12 @@ export const TOOLS: ToolDef[] = [
     description:
       "Client-only, BLOCKING. One module, no policy: aim at the entity and swing until 'hits' hits land or the budget runs out. It never walks, never strafes and never picks a target — closing the distance is a move_to, stepping back is a move_to, and 'keep hitting until it dies' is calling this again. " +
       "Only swings when the target is within reach and the attack cooldown is charged, so every hit is a full-damage one. " +
+      "Give 'uuid', or 'target' — nearest_hostile is the usual one when something is chewing on you and you would rather not look up its id. " +
       "Returns state 'hit' (hits met) / 'killed' / 'out_of_reach' (it moved — close the gap yourself) / 'budget' / 'target_gone' / 'not_found', plus 'damageDealt' measured from the target's health bar." +
       OBSERVE_NOTE,
     inputSchema: {
-      uuid: z.string().describe("Entity UUID to hit."),
+      uuid: z.string().optional().describe("Entity UUID to hit. Give this or 'target'."),
+      target: z.string().optional().describe(`A shorthand instead of 'uuid': ${TARGET_SPEC}.`),
       hits: z.number().int().min(0).max(64).optional().default(1).describe("Stop after this many landed hits (0 = keep swinging for the whole budget)."),
       timeoutSeconds: z.number().int().min(1).max(60).optional().default(10),
       waitSeconds: waitSeconds(60),

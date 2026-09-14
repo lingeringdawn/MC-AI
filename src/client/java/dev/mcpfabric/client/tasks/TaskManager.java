@@ -5,11 +5,13 @@ import dev.mcpfabric.McpFabric;
 import net.minecraft.client.Minecraft;
 
 /**
- * Runs at most one goal-oriented {@link ClientTask} at a time.
+ * Runs at most one goal-oriented {@link ClientTask} at a time, and never makes anyone wait for it.
  *
- * <p>{@link #submit} and {@link #tick} run on the game thread; {@link #await} is meant to be called
- * from an RPC worker thread and simply waits for the active task to settle, so the game keeps
- * ticking underneath.
+ * <p>{@link #submit} and {@link #tick} run on the game thread. {@link #submit} hands back the moment
+ * the task is in charge: it does not wait for it to settle, because a caller that is blocked on a long
+ * action has no way to change its mind while the world moves underneath it. The caller watches through
+ * {@link #status} / {@link #observe} and keeps the last word — submitting anything else supersedes the
+ * running task on the spot, and {@link #cancel} stops it.
  *
  * <p>Every running task is also fed through a {@link TaskObserver}, which samples the world each
  * tick. That becomes part of the status payload, so a caller blocked on a long action (or polling
@@ -29,13 +31,45 @@ public final class TaskManager {
 	private volatile ClientTask current;
 	private final TaskObserver observer = new TaskObserver();
 
-	/** Submit on the game thread. Returns false if another task is still running. */
-	public synchronized boolean submit(ClientTask task) {
-		if (current != null && !current.isDone()) return false;
+	/**
+	 * Put this task in charge on the game thread and return at once with what happened.
+	 *
+	 * <p>Whatever was running is superseded — cancelled and named in the reply — rather than refused.
+	 * A caller changing its mind is the normal case, not an error: a new instruction should take effect
+	 * on the next tick, not once the old one has decided it is finished. Nothing here waits for the task
+	 * to settle; that is what {@link #status} is for.
+	 */
+	public synchronized JsonObject submit(ClientTask task) {
+		Minecraft mc = Minecraft.getInstance();
+		ClientTask previous = current;
+		String superseded = null;
+		if (previous != null && !previous.isDone()) {
+			superseded = previous.describe();
+			try {
+				previous.onCancel(mc);
+			} catch (Throwable ignored) {
+				// best effort: a superseded task gets no say in the matter
+			}
+			previous.fail("superseded");
+			observer.note("superseded " + superseded);
+		}
 		current = task;
 		observer.begin(task);
-		task.onStart(Minecraft.getInstance());
-		return true;
+		task.onStart(mc);
+		observer.sample(mc, task);
+
+		JsonObject o = new JsonObject();
+		o.addProperty("state", "running");
+		o.addProperty("active", true);
+		o.addProperty("task", task.describe());
+		o.addProperty("deadlineMs", task.remainingMsLeft());
+		o.addProperty("note", superseded == null
+				? "Started. Nothing waits for it: watch it with action.status / observe, send any other "
+						+ "action to take over, or action.cancel to stop it."
+				: "Replaced '" + superseded + "', which was still running. Same controls apply to this one.");
+		if (superseded != null) o.addProperty("superseded", superseded);
+		addObservation(o);
+		return o;
 	}
 
 	public ClientTask current() {
@@ -98,48 +132,19 @@ public final class TaskManager {
 
 
 	/**
-	 * Block the calling (worker) thread until the active task settles or {@code waitMs} elapses.
-	 * A return value with {@code state:"running"} means the task is still going — poll action.status.
+	 * Stop the active task on the game thread. It settles as {@code cancelled} and stays readable
+	 * through {@link #status}, so the caller can see that its instruction was obeyed and why.
 	 */
-	public JsonObject await(long waitMs) {
-		long deadline = System.currentTimeMillis() + Math.max(1L, waitMs);
-		ClientTask t = current;
-		if (t == null) return idle("no active task");
-		while (System.currentTimeMillis() < deadline) {
-			if (t.isDone()) {
-				JsonObject r = t.result();
-				synchronized (this) {
-					if (current == t) current = null;
-				}
-				attachObservation(r, t);
-				return r;
-			}
-			try {
-				Thread.sleep(20L);
-			} catch (InterruptedException e) {
-				Thread.currentThread().interrupt();
-				return idle("interrupted");
-			}
-		}
-		JsonObject o = new JsonObject();
-		o.addProperty("state", "running");
-		o.addProperty("detail", "still running after wait budget; poll action.status");
-		attachObservation(o, t);
-		return o;
-	}
-
-	/** Cancel the active task on the game thread. */
 	public synchronized void cancel(Minecraft mc) {
 		ClientTask t = current;
-		if (t != null && !t.isDone()) {
-			try {
-				t.onCancel(mc);
-			} catch (Throwable ignored) {
-				// best effort
-			}
-			t.fail("cancelled");
+		if (t == null || t.isDone()) return;
+		try {
+			t.onCancel(mc);
+		} catch (Throwable ignored) {
+			// best effort
 		}
-		current = null;
+		t.fail("cancelled");
+		observer.note("cancelled " + t.describe());
 	}
 
 	public JsonObject status() {

@@ -134,7 +134,9 @@ public final class AnomalyResponder {
 		ClientTask task = build(tool, args);
 		if (task == null) return false;
 		task.setDeadline(BUDGET_MS);
-		return TaskManager.get().submit(task);
+		// Submit and report: the remedy runs on its own and the caller stays free to overrule it.
+		TaskManager.get().submit(task);
+		return true;
 	}
 
 	private ClientTask build(String tool, JsonObject args) {

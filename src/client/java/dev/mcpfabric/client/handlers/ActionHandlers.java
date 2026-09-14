@@ -9,75 +9,54 @@ import dev.mcpfabric.bridge.RpcContext;
 import dev.mcpfabric.bridge.RpcException;
 import dev.mcpfabric.bridge.RpcRouter;
 import dev.mcpfabric.client.ClientMc;
+import dev.mcpfabric.client.Targets;
 import dev.mcpfabric.client.tasks.AnomalyResponder;
 import dev.mcpfabric.client.tasks.ClientTask;
-import dev.mcpfabric.client.tasks.SwingTask;
 import dev.mcpfabric.client.tasks.CraftTask;
 import dev.mcpfabric.client.tasks.EatTask;
 import dev.mcpfabric.client.tasks.MineBlockTask;
 import dev.mcpfabric.client.tasks.MlgTask;
 import dev.mcpfabric.client.tasks.MoveToTask;
+import dev.mcpfabric.client.tasks.PlanTask;
 import dev.mcpfabric.client.tasks.RetreatTask;
 import dev.mcpfabric.client.tasks.SurfaceTask;
+import dev.mcpfabric.client.tasks.SwingTask;
 import dev.mcpfabric.client.tasks.TaskManager;
+import dev.mcpfabric.client.tasks.TaskModules;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.item.Item;
 
 import java.util.UUID;
 
 /**
- * Goal-oriented, blocking actions. Unlike the atomic control/interact tools (which return the moment
- * an input is issued), each call here drives a whole multi-tick behaviour to completion and returns
- * only when it settles — "mine that block", "walk there", "grab the drops".
+ * The slow, goal-oriented actions: each drives a whole multi-tick behaviour and returns only when it
+ * settles — "walk there", "mine that block", "hit that mob".
+ *
+ * <p>Every module is declared once, here, and becomes two things at the same time: a method you can
+ * call on its own ({@code action.moveTo}) and a step an {@code action.do} plan can contain
+ * ({@link PlanTask}). Same parameters, same code — so a plan is exactly the list of calls you would
+ * otherwise make one at a time, minus the round-trips between them.
  */
 public final class ActionHandlers {
 	private ActionHandlers() {}
 
 	public static void register(RpcRouter router) {
-		router.register("action.moveTo", ctx -> run(ctx, ctx2 -> new MoveToTask(
-				BlockPos.containing(ctx2.getDouble("x"), ctx2.getDouble("y"), ctx2.getDouble("z")),
-				ctx2.optDouble("reachRadius", 1.0),
-				ctx2.optBool("sprint", false)), ctx.optInt("timeoutSeconds", 30)));
+		TaskModules.register("moveTo", ActionHandlers::moveTo, 30);
+		TaskModules.register("mineBlock", ActionHandlers::mineBlock, 30);
+		TaskModules.register("swing", ActionHandlers::swing, 10);
+		TaskModules.register("eat", p -> new EatTask(), 20);
+		TaskModules.register("retreat", ActionHandlers::retreat, 20);
+		TaskModules.register("surface", p -> new SurfaceTask(), 20);
+		TaskModules.register("mlg", p -> new MlgTask(), 20);
+		TaskModules.register("craft", ActionHandlers::craft, 60);
 
-		router.register("action.mineBlock", ctx -> run(ctx, ctx2 -> new MineBlockTask(
-				BlockPos.containing(ctx2.getDouble("x"), ctx2.getDouble("y"), ctx2.getDouble("z"))),
-				ctx.optInt("timeoutSeconds", 30)));
+		for (TaskModules.Module module : TaskModules.all().values()) {
+			router.register("action." + module.name(), ctx -> run(ctx,
+					ctx2 -> module.factory().create(ctx2.params()),
+					ctx.optInt("timeoutSeconds", module.defaultTimeoutSeconds())));
+		}
 
-		router.register("action.eat", ctx -> run(ctx, ctx2 -> new EatTask(), ctx.optInt("timeoutSeconds", 20)));
-
-		// Hit an entity. Deliberately a single module: closing the distance is a moveTo, stepping back is
-		// a moveTo, keeping at it is another swing — the caller composes the fight.
-		router.register("action.swing", ctx -> run(ctx, ctx2 -> new SwingTask(
-				uuid(ctx2, "uuid"), Math.max(0, ctx2.optInt("hits", 1))),
-				ctx.optInt("timeoutSeconds", 10)));
-
-		// Withdraw from something. Nothing calls this on the bot's own initiative: the observation feed
-		// reports health and nearby hostiles, and the caller decides whether to back off.
-		router.register("action.retreat", ctx -> {
-			double distance = Math.max(1.5, Math.min(64.0, ctx.optDouble("distance", 6.0)));
-			RetreatTask task;
-			if (ctx.has("uuid")) {
-				task = new RetreatTask(uuid(ctx, "uuid"), distance);
-			} else if (ctx.has("x") && ctx.has("y") && ctx.has("z")) {
-				task = new RetreatTask(ctx.getDouble("x"), ctx.getDouble("y"), ctx.getDouble("z"), distance);
-			} else {
-				throw RpcException.badRequest("Give either 'uuid' (back away from an entity) "
-						+ "or 'x'/'y'/'z' (back away from a coordinate).");
-			}
-			return run(ctx, ctx2 -> task, ctx.optInt("timeoutSeconds", 20));
-		});
-
-		// Swim up for air. There is no drowning reflex any more: the caller watches the air bar in the
-		// observation feed and asks for this when it wants the head above water.
-		router.register("action.surface", ctx -> run(ctx, ctx2 -> new SurfaceTask(),
-				ctx.optInt("timeoutSeconds", 20)));
-
-		// Place water under yourself mid-fall and take it back. Explicit for the same reason: whether a
-		// drop is worth saving is a decision, not a reflex.
-		router.register("action.mlg", ctx -> run(ctx, ctx2 -> new MlgTask(),
-				ctx.optInt("timeoutSeconds", 20)));
-
-		router.register("action.craft", ActionHandlers::craftAction);
+		registerPlan(router);
 
 		router.register("action.status", ctx -> TaskManager.get().status());
 
@@ -103,8 +82,57 @@ public final class ActionHandlers {
 		}));
 	}
 
-	private interface TaskFactory {
-		ClientTask create(RpcContext ctx) throws RpcException;
+	// --- the plan ---------------------------------------------------------------------------------
+
+	/** Run a caller-composed list of steps in one call. The steps are the caller's; so are the guards. */
+	private static void registerPlan(RpcRouter router) {
+		router.register("action.do", ctx -> run(ctx,
+				ctx2 -> plan(router, ctx2.params()),
+				ctx.optInt("timeoutSeconds", 120)));
+	}
+
+	static ClientTask plan(RpcRouter router, JsonObject p) throws RpcException {
+		if (!p.has("steps") || !p.get("steps").isJsonArray()) {
+			throw RpcException.badRequest("Missing 'steps': give an array of steps, e.g. "
+					+ "[{\"action\":\"moveTo\",\"target\":\"nearest_drop\"},{\"rpc\":\"inventory.selectHotbar\",\"slot\":0}].");
+		}
+		String onFailure = optString(p, "onFailure", "stop");
+		if (!"stop".equals(onFailure) && !"continue".equals(onFailure)) {
+			throw RpcException.badRequest("'onFailure' is 'stop' (default) or 'continue'; got '" + onFailure + "'.");
+		}
+		JsonObject guard = p.has("guard") && p.get("guard").isJsonObject() ? p.getAsJsonObject("guard") : new JsonObject();
+		return new PlanTask(router, p.getAsJsonArray("steps"), "continue".equals(onFailure),
+				optDouble(guard, "abortIfHealthBelow", 0.0),
+				optInt(guard, "abortIfAirBelow", 0),
+				optBool(guard, "abortIfDead", false));
+	}
+
+	// --- modules ----------------------------------------------------------------------------------
+
+	static ClientTask moveTo(JsonObject p) throws RpcException {
+		return new MoveToTask(goal(p, "moveTo"),
+				optDouble(p, "reachRadius", 1.0),
+				optBool(p, "sprint", false));
+	}
+
+	static ClientTask mineBlock(JsonObject p) throws RpcException {
+		return new MineBlockTask(goal(p, "mineBlock"));
+	}
+
+	/** Hit an entity. One module: closing the distance is a moveTo, keeping at it is another swing. */
+	static ClientTask swing(JsonObject p) throws RpcException {
+		return new SwingTask(uuidOf(p, "swing"), Math.max(0, optInt(p, "hits", 1)));
+	}
+
+	/** Withdraw from an entity or a place. Nothing does this on the bot's own initiative. */
+	static ClientTask retreat(JsonObject p) throws RpcException {
+		double distance = Math.max(1.5, Math.min(64.0, optDouble(p, "distance", 6.0)));
+		if (p.has("uuid") || p.has("target")) return new RetreatTask(uuidOf(p, "retreat"), distance);
+		if (p.has("x") && p.has("y") && p.has("z")) {
+			return new RetreatTask(num(p, "x"), num(p, "y"), num(p, "z"), distance);
+		}
+		throw RpcException.badRequest("Give 'uuid' or 'target' (back away from an entity), or 'x'/'y'/'z' "
+				+ "(back away from a coordinate).");
 	}
 
 	/**
@@ -112,18 +140,52 @@ public final class ActionHandlers {
 	 * tick, so the whole sequence is visible in-game instead of happening invisibly. {@code grid} is
 	 * row-major — 4 entries for the player's 2x2 inventory grid, 9 for an open crafting table.
 	 */
-	static JsonObject craftAction(RpcContext ctx) throws RpcException {
-		Item[] wanted = parseGrid(ctx);
-		int count = Math.max(1, Math.min(64, ctx.optInt("count", 1)));
-		return run(ctx, ctx2 -> new CraftTask(wanted, count), ctx.optInt("timeoutSeconds", 60));
+	static ClientTask craft(JsonObject p) throws RpcException {
+		return new CraftTask(parseGrid(p), Math.max(1, Math.min(64, optInt(p, "count", 1))));
+	}
+
+	// --- parameter helpers ------------------------------------------------------------------------
+
+	/** Crafting under its older name: the same task and the same parameters as {@code action.craft}. */
+	public static JsonObject craftAlias(RpcContext ctx) throws RpcException {
+		return run(ctx, ctx2 -> craft(ctx2.params()), ctx.optInt("timeoutSeconds", 60));
+	}
+
+	/**
+	 * Where a step aims: explicit x/y/z, or the caller's shorthand for "that thing over there"
+	 * ({@link Targets}). A shorthand is resolved when the step is built, so inside a plan it names the
+	 * drop that exists <em>after</em> the steps before it ran.
+	 */
+	private static BlockPos goal(JsonObject p, String what) throws RpcException {
+		if (p.has("target")) {
+			return Targets.block(optString(p, "target", ""), "'" + what + "'");
+		}
+		if (p.has("x") && p.has("y") && p.has("z")) {
+			return BlockPos.containing(num(p, "x"), num(p, "y"), num(p, "z"));
+		}
+		throw RpcException.badRequest("Give 'x'/'y'/'z' (a block position), or 'target' = " + Targets.SPECS + ".");
+	}
+
+	/** An entity to act on: an explicit UUID, or a shorthand the caller would rather say. */
+	private static UUID uuidOf(JsonObject p, String what) throws RpcException {
+		if (p.has("target")) return Targets.entity(optString(p, "target", ""), "'" + what + "'");
+		if (p.has("uuid")) {
+			String raw = optString(p, "uuid", "");
+			try {
+				return UUID.fromString(raw);
+			} catch (IllegalArgumentException e) {
+				throw RpcException.badRequest("Invalid UUID: " + raw);
+			}
+		}
+		throw RpcException.badRequest("Give 'uuid' (an entity id), or 'target' = " + Targets.SPECS + ".");
 	}
 
 	/** Parse the row-major 'grid' array into one item per cell ({@code null} = empty cell). */
-	private static Item[] parseGrid(RpcContext ctx) throws RpcException {
-		if (!ctx.has("grid") || !ctx.params().get("grid").isJsonArray()) {
+	private static Item[] parseGrid(JsonObject p) throws RpcException {
+		if (!p.has("grid") || !p.get("grid").isJsonArray()) {
 			throw RpcException.badRequest("Missing 'grid' array.");
 		}
-		JsonArray arr = ctx.params().getAsJsonArray("grid");
+		JsonArray arr = p.getAsJsonArray("grid");
 		if (arr.size() != 4 && arr.size() != 9) {
 			throw RpcException.badRequest("'grid' needs 4 entries (player 2x2) or 9 (crafting table 3x3); got "
 					+ arr.size() + ".");
@@ -143,34 +205,50 @@ public final class ActionHandlers {
 		return wanted;
 	}
 
-	private static JsonObject run(RpcContext ctx, TaskFactory factory, int timeoutSeconds) throws RpcException {
-		requireControl();
-		int secs = Math.max(1, Math.min(300, timeoutSeconds));
-		ClientTask task = factory.create(ctx);
-		task.setDeadline(secs * 1000L);
-		ClientMc.call(() -> {
-			if (!TaskManager.get().submit(task)) {
-				throw RpcException.unavailable("Another action is already running. This is a short-step API: omit "
-						+ "'waitSeconds' so each call returns once its step has settled, then compose the next step. "
-						+ "Or poll action_status until idle, or call action.cancel first.");
-			}
-			return Json.ok("started");
-		});
-		// A caller can cap how long this HTTP call blocks and then keep polling. That keeps a long
-		// action from being cut off by an MCP client's request timeout while still letting the model
-		// watch the world tick via the live snapshot in the returned payload.
-		long waitMs = ctx.has("waitSeconds")
-				? Math.max(0L, ctx.optInt("waitSeconds", 0)) * 1000L
-				: secs * 1000L + 2000L;
-		return TaskManager.get().await(waitMs);
+	private static double num(JsonObject p, String key) throws RpcException {
+		if (!p.has(key) || !p.get(key).isJsonPrimitive()) {
+			throw RpcException.badRequest("Missing required number '" + key + "'.");
+		}
+		return p.get(key).getAsDouble();
 	}
 
-	private static UUID uuid(RpcContext ctx, String key) throws RpcException {
-		try {
-			return UUID.fromString(ctx.getString(key));
-		} catch (IllegalArgumentException e) {
-			throw RpcException.badRequest("Invalid UUID: " + ctx.optString(key, ""));
-		}
+	private static double optDouble(JsonObject p, String key, double fallback) {
+		return p.has(key) && p.get(key).isJsonPrimitive() ? p.get(key).getAsDouble() : fallback;
+	}
+
+	private static int optInt(JsonObject p, String key, int fallback) {
+		return p.has(key) && p.get(key).isJsonPrimitive() ? p.get(key).getAsInt() : fallback;
+	}
+
+	private static boolean optBool(JsonObject p, String key, boolean fallback) {
+		return p.has(key) && p.get(key).isJsonPrimitive() ? p.get(key).getAsBoolean() : fallback;
+	}
+
+	private static String optString(JsonObject p, String key, String fallback) {
+		return p.has(key) && p.get(key).isJsonPrimitive() ? p.get(key).getAsString() : fallback;
+	}
+
+	// --- plumbing ---------------------------------------------------------------------------------
+
+	private interface TaskFactory {
+		ClientTask create(RpcContext ctx) throws RpcException;
+	}
+
+	/**
+	 * Start a module and hand control straight back — nothing here waits for it to settle.
+	 *
+	 * <p>A blocking call would take away the caller's only lever for as long as the action lasts, which
+	 * is exactly when it might want to use it: a step that turns out to be wrong, a mob appearing, a
+	 * cliff. Instead every action is a request the caller can watch (action.status / observe) and
+	 * overrule the moment it likes — another action supersedes this one on the next tick, and
+	 * action.cancel stops it outright.
+	 */
+	private static JsonObject run(RpcContext ctx, TaskFactory factory, int timeoutSeconds) throws RpcException {
+		requireControl();
+		int secs = Math.max(1, Math.min(600, timeoutSeconds));
+		ClientTask task = factory.create(ctx);
+		task.setDeadline(secs * 1000L);
+		return ClientMc.call(() -> TaskManager.get().submit(task));
 	}
 
 	private static void requireControl() throws RpcException {

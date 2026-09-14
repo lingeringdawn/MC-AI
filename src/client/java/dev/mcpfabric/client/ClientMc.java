@@ -35,8 +35,25 @@ public final class ClientMc {
 		return g;
 	}
 
-	/** Run a task on the render thread and wait for the result. */
+	/**
+	 * Run a task on the render thread and wait for the result.
+	 *
+	 * <p>When the caller is <em>already</em> on the render thread — a plan step driving a handler from
+	 * inside the client tick, for instance — the work runs inline instead. Scheduling it would put it
+	 * behind the very tick that is waiting for it, which is a deadlock that only ends when the call
+	 * times out.
+	 */
 	public static <T> T call(ThrowingSupplier<T> task) throws RpcException {
-		return MainThread.call(mc(), McpFabric.config().callTimeoutMs, task);
+		Minecraft mc = mc();
+		if (mc.isSameThread()) {
+			try {
+				return task.get();
+			} catch (RpcException e) {
+				throw e;
+			} catch (Throwable t) {
+				throw new RpcException("internal", t.getClass().getSimpleName() + ": " + t.getMessage());
+			}
+		}
+		return MainThread.call(mc, McpFabric.config().callTimeoutMs, task);
 	}
 }

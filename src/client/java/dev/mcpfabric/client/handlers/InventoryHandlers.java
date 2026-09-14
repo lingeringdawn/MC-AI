@@ -57,7 +57,7 @@ public final class InventoryHandlers {
 
 		// Crafting is the very same task as action.craft: it opens the container screen like a player
 		// pressing E and clicks the grid one slot per tick, so it is visible and blocks until done.
-		router.register("inventory.craft", ActionHandlers::craftAction);
+		router.register("inventory.craft", ActionHandlers::craftAlias);
 	}
 
 	/**
