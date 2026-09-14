@@ -81,6 +81,29 @@ public final class ControlHandlers {
 			return Json.ok("stopped using");
 		}));
 
+		// Scroll the hotbar the way a wheel does: a player does not type a slot number, they roll the wheel.
+		// MouseHandler.onScroll — the handler GLFW actually calls — is private, so this calls the method
+		// that handler itself calls, once per notch, which keeps the game's own direction convention and
+		// wrap-around. Typing a slot directly stays available as inventory.selectHotbar; this is the wheel.
+		router.register("control.scrollHotbar", ctx -> ClientMc.call(() -> {
+			int notches = Math.max(-9, Math.min(9, ctx.optInt("notches", 1)));
+			LocalPlayer p = ClientMc.player();
+			int before = p.getInventory().getSelectedSlot();
+			int slot = Math.floorMod(before + notches, 9);
+			// What a wheel does — one slot per notch, wrapping round the nine — reproduced rather than
+			// called: MouseHandler.onScroll is private, and so is the inventory's own paint method. The
+			// move goes out through the same pair of calls the direct-slot tool uses, so the server is told
+			// either way. A positive count scrolls the way "wheel up" does.
+			p.getInventory().setSelectedSlot(slot);
+			p.connection.send(new net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket(slot));
+			JsonObject o = new JsonObject();
+			o.addProperty("scrolled", notches);
+			o.addProperty("slotBefore", before);
+			o.addProperty("slot", slot);
+			o.addProperty("note", "One slot per notch, wrapping around the nine hotbar slots.");
+			return o;
+		}));
+
 		router.register("control.setPauseOnLostFocus", ctx -> ClientMc.call(() -> {
 			Minecraft.getInstance().options.pauseOnLostFocus = ctx.optBool("value", false);
 			return Json.ok("pauseOnLostFocus=" + Minecraft.getInstance().options.pauseOnLostFocus);
