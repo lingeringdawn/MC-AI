@@ -106,6 +106,11 @@ final class BlockMiner {
 		}
 
 		aim(mc, p);
+		// No jumping while the crosshair is supposed to be on the block. In shallow water the swim stroke
+		// used to keep the jump key held, so the bot bounced in place, its eye moved every tick, and the
+		// aim slipped off the block — restarting the break it was half-way through. Nothing is more
+		// expensive to a dig than moving the camera, and nothing about mining needs a hop.
+		BotController.get().clearJump();
 		// Press only once the crosshair is actually on the block: the click that starts a break uses
 		// vanilla's own hit result, and the ray clip further down only proves there is a clear line to
 		// the block, which is not the same question. This is checked against that same hit result rather

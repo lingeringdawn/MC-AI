@@ -3,7 +3,6 @@ package dev.mcpfabric.client;
 import com.google.gson.JsonObject;
 import dev.mcpfabric.McpFabric;
 import dev.mcpfabric.client.nav.AStarPathfinder;
-import dev.mcpfabric.client.tasks.TaskManager;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Options;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -195,6 +194,16 @@ public final class BotController {
 		jumpOnceTicks = 0;
 		// Deliberately does NOT drop the caller's hold: a step being cancelled is not the caller
 		// changing their mind, and the keys they are holding are theirs to release.
+	}
+
+	/**
+	 * Drop any jump in progress or pending. A task aiming at a block calls this every tick: hopping moves
+	 * the eye every tick, and the crosshair decides whether the break counts at all, so a bot that bounces
+	 * in place restarts its own break forever without ever finishing one.
+	 */
+	public synchronized void clearJump() {
+		jumpHeld = false;
+		jumpOnceTicks = 0;
 	}
 
 	public synchronized void jumpOnce() {
@@ -418,14 +427,12 @@ public final class BotController {
 			// controls. The AI's camera is re-applied last, so what it aimed at is where the view stays.
 			boolean locked = cameraLocked();
 			if (locked) applyLook(p, lastAppliedYaw, lastAppliedPitch);
-			// The bot holds the mouse for as long as it has anything on — a task in charge, or inputs it is
-			// driving itself. The real input channel is dead without the grab (handleKeybinds passes
-			// continueAttack(false) when the mouse is not grabbed, and that skips digging entirely), so the
-			// grab is what makes the bot's held keys and clicks count as a player's. Once it has the
-			// channel it keeps it: nothing here ever releases the mouse.
-			if (!mc.mouseHandler.isMouseGrabbed() && (locked || TaskManager.get().busy())) {
-				mc.mouseHandler.grabMouse();
-			}
+			// The mouse is never taken from the player: no grab, no release, no cursor sitting in a window
+			// it does not belong to. The bot borrows the real input channel exactly as it finds it — held
+			// keys and genuine clicks, which vanilla turns into a player's break — and when the mouse is
+			// not grabbed (nobody is at the controls) that channel is simply not live, so the bot waits
+			// rather than seizing it. That is why "the dig does nothing" is worth checking against
+			// observe.mouseGrabbed before blaming the dig.
 			// The caller's own inputs go on last, after the running step and the path follower have had
 			// their say, so a steering correction actually steers instead of being overwritten next tick.
 			applyUserInput();
@@ -699,8 +706,12 @@ public final class BotController {
 			BlockPos headAhead = feetAhead.above();
 			boolean bankAhead = horiz >= 0.05 && !descending
 					&& solid(level, feetAhead) && passable(level, headAhead) && !liquid(level, headAhead);
-			// Hold the stroke unless the path actually wants us lower — letting go is the dive.
-			jumpHeld = !(descending && !bankAhead);
+			// Hold the stroke only while actually swimming — floating, or climbing out at a bank.
+			// Standing on the bottom of a one-block puddle is not swimming, and holding jump there just
+			// makes the bot bounce in place: the eye moves every tick and its own crosshair slides off
+			// whatever it is trying to mine. Letting go is also what makes it dive when the path wants it.
+			boolean swimming = !p.onGround() || bankAhead;
+			jumpHeld = swimming && !(descending && !bankAhead);
 		} else if (climbing) {
 			// On a ladder or vine the way up is to hold forward against it and keep pressing jump.
 			sprint = false;

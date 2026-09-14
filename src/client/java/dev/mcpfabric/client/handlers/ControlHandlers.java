@@ -93,6 +93,9 @@ public final class ControlHandlers {
 			JsonObject o = new JsonObject();
 			o.addProperty("cameraLocked", b.cameraLocked());
 			o.addProperty("mouseGrabbed", mc.mouseHandler.isMouseGrabbed());
+			// Without an active window, grabMouse() is a no-op and the whole input channel stays dead —
+			// the one thing worth knowing when "the bot keys do nothing".
+			o.addProperty("windowActive", mc.isWindowActive());
 			o.addProperty("drivingKeys", b.isDrivingKeys());
 			o.addProperty("wantsForward", b.wantsForward());
 			o.addProperty("wantsBack", b.wantsBack());

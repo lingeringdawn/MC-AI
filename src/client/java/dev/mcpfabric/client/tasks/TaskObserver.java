@@ -186,6 +186,13 @@ public final class TaskObserver {
 		pos.addProperty("z", round(p.getZ()));
 		o.add("pos", pos);
 		o.addProperty("moved", round(p.getDeltaMovement().horizontalDistance()));
+		// The input channel the bot drives — held keys, clicks — is only live while the game window is
+		// active and the mouse is grabbed: MouseHandler.grabMouse() returns immediately when the window is
+		// not active, and vanilla's handleKeybinds then passes continueAttack(false), which skips mining
+		// altogether. Reported here because its absence is indistinguishable from "the dig is stuck for no
+		// reason", which is exactly how it looked until this was tracked down.
+		o.addProperty("windowActive", mc.isWindowActive());
+		o.addProperty("mouseGrabbed", mc.mouseHandler.isMouseGrabbed());
 
 		// --- what the crosshair is on ---------------------------------------
 		o.add("lookingAt", lookingAt(mc, level));
