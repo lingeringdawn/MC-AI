@@ -65,13 +65,12 @@ public class McpFabricClient implements ClientModInitializer {
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
 			if (!pausePatched) {
 				// Single-player pauses itself the moment the window loses focus, which would stall every
-				// bot action mid-swing while the human is in another window. Keep the world ticking
-				// instead; the bot still only moves when it has control (see HumanControl).
+				// bot action mid-swing. Keep the world ticking instead — nothing here hands control back
+				// to a human, and while the bot is operating the mouse cannot steer its camera either.
 				client.options.pauseOnLostFocus = false;
 				pausePatched = true;
 				McpFabric.LOGGER.info("[mcpfabric] pause-on-lost-focus disabled");
 			}
-			HumanControl.tick(client);
 		});
 		ClientTickEvents.END_CLIENT_TICK.register(client -> BotController.get().onClientTick(client));
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {

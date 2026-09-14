@@ -298,6 +298,17 @@ public final class BotController {
 		return !Float.isNaN(lastAppliedYaw);
 	}
 
+	/**
+	 * True while the bot is the one operating — walking, aiming, mining, using, swinging or hopping.
+	 * That is exactly when the mouse must not be able to move the camera (see the tick), so the
+	 * question is asked in one place instead of being scattered across every input path.
+	 */
+	public synchronized boolean cameraLocked() {
+		return !Float.isNaN(lastAppliedYaw)
+				&& (path != null || attackHeld || useHeld || lookTargetYaw != null
+						|| fwd || back || left || right || jumpHeld || jumpOnceTicks > 0);
+	}
+
 	public synchronized float lastAppliedYaw() {
 		return lastAppliedYaw;
 	}
@@ -386,18 +397,9 @@ public final class BotController {
 				lookTargetPitch = null;
 				lookPriority = Integer.MIN_VALUE;
 			}
-			// A real player has the controls: drop everything and let them drive.
-			if (HumanControl.suspended()) {
-				stopAllMovement();
-				attackHeld = false;
-				useHeld = false;
-				clearLookTarget();
-				if (drivingKeys) {
-					releaseKeys(mc.options);
-					drivingKeys = false;
-				}
-				return;
-			}
+			// Nothing here yields to a human any more: the bot is the only driver. There is no hand-off
+			// gesture to watch for and no paused-for-humans state — while the bot is operating, the
+			// camera is locked to what it aimed at (see the end of this tick).
 
 			// Steering is the whole of this controller's job: it does exactly what the caller asked for,
 			// and nothing whatsoever on its own. Every other behaviour is a task the AI triggers, so
@@ -408,6 +410,12 @@ public final class BotController {
 			// Look is applied last: navigation and the active task have both had their say this tick,
 			// so the winner of the priority arbitration is what actually moves the camera.
 			tickLook(p);
+			// The mouse does not have the camera while the bot is driving. Vanilla applies mouse movement
+			// to the player's rotation every frame, which is right when nobody is at the keyboard and
+			// actively unhelpful mid-aim: a hand resting on the mouse would drag the view off the block
+			// being mined or the mob being hit, and the bot would look like it was fighting its own
+			// controls. The AI's camera is re-applied last, so what it aimed at is where the view stays.
+			if (cameraLocked()) applyLook(p, lastAppliedYaw, lastAppliedPitch);
 			// The caller's own inputs go on last, after the running step and the path follower have had
 			// their say, so a steering correction actually steers instead of being overwritten next tick.
 			applyUserInput();

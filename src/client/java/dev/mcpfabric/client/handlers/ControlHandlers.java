@@ -5,7 +5,6 @@ import dev.mcpfabric.bridge.Json;
 import dev.mcpfabric.bridge.RpcRouter;
 import dev.mcpfabric.client.BotController;
 import dev.mcpfabric.client.ClientMc;
-import dev.mcpfabric.client.HumanControl;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Options;
 import net.minecraft.client.player.LocalPlayer;
@@ -82,11 +81,6 @@ public final class ControlHandlers {
 			return Json.ok("stopped using");
 		}));
 
-		router.register("control.resumeAi", ctx -> {
-			HumanControl.resumeByAi();
-			return Json.ok("ai has control");
-		});
-
 		router.register("control.setPauseOnLostFocus", ctx -> ClientMc.call(() -> {
 			Minecraft.getInstance().options.pauseOnLostFocus = ctx.optBool("value", false);
 			return Json.ok("pauseOnLostFocus=" + Minecraft.getInstance().options.pauseOnLostFocus);
@@ -97,7 +91,7 @@ public final class ControlHandlers {
 			Minecraft mc = Minecraft.getInstance();
 			BotController b = BotController.get();
 			JsonObject o = new JsonObject();
-			o.addProperty("suspended", HumanControl.suspended());
+			o.addProperty("cameraLocked", b.cameraLocked());
 			o.addProperty("drivingKeys", b.isDrivingKeys());
 			o.addProperty("wantsForward", b.wantsForward());
 			o.addProperty("wantsBack", b.wantsBack());
