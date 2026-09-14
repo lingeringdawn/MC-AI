@@ -38,6 +38,12 @@ public final class BotController {
 	/** Held right mouse button: use / eat / place with the crosshair context. */
 	private volatile boolean useHeld;
 
+	// caller override (see setUserInput): movement the caller is holding, and for how much longer
+	/** How long the caller keeps the movement keys after their last request. */
+	private static final int USER_INPUT_HOLD_TICKS = 10;
+	private int userHold;
+	private Boolean uFwd, uBack, uLeft, uRight, uJump, uSneak, uSprint;
+
 	// navigation
 	private List<BlockPos> path;
 	private int pathIndex;
@@ -63,6 +69,12 @@ public final class BotController {
 	public static final int LOOK_USER = 3;
 	/** How long the current look owner keeps the view after its last refresh. */
 	private static final long LOOK_HOLD_TICKS = 3;
+	/**
+	 * How long the caller's own aim keeps the view after their last request. Longer than a task's,
+	 * because "look over there" means hold the gaze, not flick at it and let the walker take it back —
+	 * and finite, so a caller who has moved on is not left owning the camera a second later.
+	 */
+	private static final long LOOK_USER_HOLD_TICKS = 20;
 
 	private Float lookTargetYaw;
 	private Float lookTargetPitch;
@@ -104,19 +116,84 @@ public final class BotController {
 
 	// --- public control surface (called from handlers, on the render thread) ----------------
 
+	/**
+	 * Movement for whatever step is running. While the caller is holding a direction, the whole axis is
+	 * theirs: pressing "back" has to let go of "forward" the way a keyboard does, otherwise the two
+	 * cancel out and the bot drifts on momentum while it looks like the correction was ignored.
+	 */
 	public synchronized void setMovement(Boolean f, Boolean b, Boolean l, Boolean r, Boolean jump, Boolean sn, Boolean sp) {
-		if (f != null) fwd = f;
-		if (b != null) back = b;
-		if (l != null) left = l;
-		if (r != null) right = r;
-		if (jump != null) jumpHeld = jump;
-		if (sn != null) sneak = sn;
-		if (sp != null) sprint = sp;
+		boolean userFb = uFwd != null || uBack != null;
+		boolean userLr = uLeft != null || uRight != null;
+		if (f != null && !userFb) fwd = f;
+		if (b != null && !userFb) back = b;
+		if (l != null && !userLr) left = l;
+		if (r != null && !userLr) right = r;
+		if (jump != null && uJump == null) jumpHeld = jump;
+		if (sn != null && uSneak == null) sneak = sn;
+		if (sp != null && uSprint == null) sprint = sp;
+	}
+
+	/**
+	 * Movement from the caller rather than from a task: it outranks whatever step is running for a
+	 * short window ({@value #USER_INPUT_HOLD_TICKS} ticks), renewed every time it is called.
+	 *
+	 * <p>A running step re-asserts its own inputs every tick, so a plain {@link #setMovement} from the
+	 * caller is gone before it can take effect — which made steering a bot that is mid-walk impossible.
+	 * This is the movement-side twin of the {@code LOOK_USER} priority: the caller's word is applied
+	 * last, after the step has had its say, and only for as long as it keeps saying it. Let the hold
+	 * lapse and the step resumes; call again to hold a course.
+	 */
+	public synchronized void setUserInput(Boolean f, Boolean b, Boolean l, Boolean r, Boolean jump, Boolean sn, Boolean sp) {
+		uFwd = f != null ? f : uFwd;
+		uBack = b != null ? b : uBack;
+		uLeft = l != null ? l : uLeft;
+		uRight = r != null ? r : uRight;
+		uJump = jump != null ? jump : uJump;
+		uSneak = sn != null ? sn : uSneak;
+		uSprint = sp != null ? sp : uSprint;
+		userHold = USER_INPUT_HOLD_TICKS;
+	}
+
+	/** Drop the caller's movement override now, and release whatever it was holding. */
+	public synchronized void clearUserInput() {
+		userHold = 0;
+		releaseUserInput();
+	}
+
+	/** Re-assert the caller's inputs over the running step's, then let the window tick down. */
+	private synchronized void applyUserInput() {
+		if (userHold <= 0) return;
+		if (uFwd != null || uBack != null) {
+			fwd = Boolean.TRUE.equals(uFwd);
+			back = Boolean.TRUE.equals(uBack);
+		}
+		if (uLeft != null || uRight != null) {
+			left = Boolean.TRUE.equals(uLeft);
+			right = Boolean.TRUE.equals(uRight);
+		}
+		if (uJump != null) jumpHeld = uJump;
+		if (uSneak != null) sneak = uSneak;
+		if (uSprint != null) sprint = uSprint;
+		if (--userHold <= 0) releaseUserInput();
+	}
+
+	private synchronized void releaseUserInput() {
+		// A nudge should end, not quietly become a walk: let go of whatever the caller was holding.
+		if (uFwd != null) fwd = false;
+		if (uBack != null) back = false;
+		if (uLeft != null) left = false;
+		if (uRight != null) right = false;
+		if (uJump != null) jumpHeld = false;
+		if (uSneak != null) sneak = false;
+		if (uSprint != null) sprint = false;
+		uFwd = uBack = uLeft = uRight = uJump = uSneak = uSprint = null;
 	}
 
 	public synchronized void stopAllMovement() {
 		fwd = back = left = right = jumpHeld = sneak = sprint = false;
 		jumpOnceTicks = 0;
+		// Deliberately does NOT drop the caller's hold: a step being cancelled is not the caller
+		// changing their mind, and the keys they are holding are theirs to release.
 	}
 
 	public synchronized void jumpOnce() {
@@ -157,7 +234,12 @@ public final class BotController {
 	 *                 task from fighting over the camera every tick.
 	 */
 	public synchronized void lookAtTarget(float yaw, float pitch, int priority) {
-		boolean held = (currentTick - lookRefreshedTick) < LOOK_HOLD_TICKS;
+		// How long the current owner is protected depends on who it is. A task or the path follower
+		// re-asks every tick, so three ticks of protection is plenty; the caller asks once and means it,
+		// so their aim is protected for its whole window. Using one fixed window here was what let the
+		// walker take the camera back 150ms after the caller had said where to look.
+		long hold = lookPriority == LOOK_USER ? LOOK_USER_HOLD_TICKS : LOOK_HOLD_TICKS;
+		boolean held = (currentTick - lookRefreshedTick) < hold;
 		if (held && priority < lookPriority) return; // someone more important owns the view right now
 		this.lookTargetYaw = yaw;
 		this.lookTargetPitch = Mth.clamp(pitch, -90.0F, 90.0F);
@@ -257,6 +339,9 @@ public final class BotController {
 		this.navState = reason;
 		fwd = false;
 		sprint = false;
+		// The swim stroke is a held jump key: it has to be let go here, or the bot walks off the beach
+		// still holding it and hops for the rest of the session.
+		jumpHeld = false;
 	}
 
 	public synchronized JsonObject statusJson() {
@@ -291,12 +376,12 @@ public final class BotController {
 
 		synchronized (this) {
 			currentTick++;
-			// A navigation/task target that its owner stopped refreshing means the walk or task is
-			// over, so drop it rather than holding the camera hostage. An explicit user look is NOT
-			// dropped here: it is a one-shot request that must survive until the turn actually
-			// arrives, otherwise a large turn would stall part-way and never finish.
-			if (lookTargetYaw != null && lookPriority < LOOK_USER
-					&& (currentTick - lookRefreshedTick) > LOOK_HOLD_TICKS) {
+			// A target its owner stopped refreshing means that owner is done with the view, so drop it
+			// rather than holding the camera hostage. The caller's own aim is held for longer, not
+			// forever: this is what makes "look there" last as long as they keep saying it and then
+			// hand the camera back to whatever the bot was doing.
+			long hold = lookPriority == LOOK_USER ? LOOK_USER_HOLD_TICKS : LOOK_HOLD_TICKS;
+			if (lookTargetYaw != null && (currentTick - lookRefreshedTick) > hold) {
 				lookTargetYaw = null;
 				lookTargetPitch = null;
 				lookPriority = Integer.MIN_VALUE;
@@ -323,6 +408,9 @@ public final class BotController {
 			// Look is applied last: navigation and the active task have both had their say this tick,
 			// so the winner of the priority arbitration is what actually moves the camera.
 			tickLook(p);
+			// The caller's own inputs go on last, after the running step and the path follower have had
+			// their say, so a steering correction actually steers instead of being overwritten next tick.
+			applyUserInput();
 			boolean driving = fwd || back || left || right || jumpHeld || sneak || sprint
 					|| jumpOnceTicks > 0 || attackHeld || useHeld || path != null;
 			if (driving) {
@@ -373,9 +461,7 @@ public final class BotController {
 		// degree makes the view shiver, because the aim point itself moves a little every tick.
 		float dead = lookPriority == LOOK_NAV ? NAV_LOOK_DEAD_ZONE : LOOK_DEAD_ZONE;
 		if (Math.abs(dYaw) <= dead && Math.abs(dPitch) <= dead) {
-			lookTargetYaw = null;
-			lookTargetPitch = null;
-			lookPriority = Integer.MIN_VALUE;
+			releaseArrivedLook();
 			return;
 		}
 		// Human-style flick: the step scales with the remaining error, so the sweep starts fast and
@@ -388,16 +474,24 @@ public final class BotController {
 		boolean pitchDone = Math.abs(dPitch) <= pitchStep;
 		if (yawDone && pitchDone) {
 			applyLook(p, ty, targetPitch);
-			// Arrived: release the view so the latch does not block the next request. Navigation and
-			// the active task re-issue their aim on the next tick anyway.
-			lookTargetYaw = null;
-			lookTargetPitch = null;
-			lookPriority = Integer.MIN_VALUE;
+			releaseArrivedLook();
 			return;
 		}
 		float yaw = yawDone ? ty : p.getYRot() + Mth.clamp(dYaw, -yawStep, yawStep);
 		float pitch = pitchDone ? targetPitch : p.getXRot() + Mth.clamp(dPitch, -pitchStep, pitchStep);
 		applyLook(p, yaw, pitch);
+	}
+
+	/**
+	 * Let go of the aim once the turn has arrived, so the next request is not blocked by a latch.
+	 * Navigation and the active step re-issue their aim every tick anyway; the caller's own aim does
+	 * not, so it is held for its window instead of being spent the moment it lands.
+	 */
+	private void releaseArrivedLook() {
+		if (lookPriority == LOOK_USER) return;
+		lookTargetYaw = null;
+		lookTargetPitch = null;
+		lookPriority = Integer.MIN_VALUE;
 	}
 
 	private void applyLook(LocalPlayer p, float yaw, float pitch) {
@@ -508,9 +602,13 @@ public final class BotController {
 			float yaw = (float) (Mth.atan2(dz, dx) * (180.0 / Math.PI)) - 90.0F;
 			yawErr = Math.abs(Mth.wrapDegrees(yaw - p.getYRot()));
 			if (inWater) {
-				// Look along the path including up/down, so swimming can descend to a submerged node.
-				double dyNode = (node.getY() + 0.5) - p.getEyeY();
-				float pitch = (float) (-(Mth.atan2(dyNode, Math.max(horiz, 0.01)) * (180.0 / Math.PI)));
+				// Swimming on the surface keeps the head level. Following every node's height tilted the
+				// camera up and down the whole way across a pond, which is not what a person does — they
+				// look where they are going. Height is only followed when the path means to go under.
+				boolean diving = node.getY() < p.getY() - 0.4;
+				float pitch = diving
+						? (float) (-(Mth.atan2((node.getY() + 0.5) - p.getEyeY(), Math.max(horiz, 0.01)) * (180.0 / Math.PI)))
+						: 0.0F;
 				lookAtTarget(yaw, Mth.clamp(pitch, -70.0F, 45.0F), LOOK_NAV);
 			} else {
 				lookAtTarget(yaw, 0.0F, LOOK_NAV);
@@ -573,20 +671,18 @@ public final class BotController {
 		}
 
 		if (inWater) {
-			// Stroke upward to climb, or to keep the head at the surface on a level swim. When the node
-			// is below, do NOT jump — that is how the bot dives to it.
-			boolean needHeight = node.getY() > p.getY() + 0.5;
+			// Surface swimming is done by HOLDING the jump key, exactly as a player does: it keeps the
+			// head up and the stroke going. Pulsing it instead made the bot bob and stall in the water.
 			boolean descending = node.getY() < p.getY() - 0.4;
-			// A bank at roughly our own level: swim up to it and hop out. The step-up hop above is
-			// skipped while in water, so without this the bot treads water against the shore forever
-			// instead of climbing out — and never getting out is what kills it.
+			// A bank at roughly our own level: swim up to it and keep the stroke so the hop carries us
+			// out. The step-up hop above is skipped while in water, so without this the bot treads water
+			// against the shore forever instead of climbing out — and never getting out is what kills it.
 			BlockPos feetAhead = BlockPos.containing(p.getX() + ux, p.getY(), p.getZ() + uz);
 			BlockPos headAhead = feetAhead.above();
 			boolean bankAhead = horiz >= 0.05 && !descending
 					&& solid(level, feetAhead) && passable(level, headAhead) && !liquid(level, headAhead);
-			if (needHeight || (p.isUnderWater() && !descending) || bankAhead) {
-				jumpOnceTicks = Math.max(jumpOnceTicks, Humanizer.ticks(jumpRng, 3, 6));
-			}
+			// Hold the stroke unless the path actually wants us lower — letting go is the dive.
+			jumpHeld = !(descending && !bankAhead);
 		} else if (climbing) {
 			// On a ladder or vine the way up is to hold forward against it and keep pressing jump.
 			sprint = false;
@@ -703,5 +799,6 @@ public final class BotController {
 		navState = reason;
 		fwd = false;
 		sprint = false;
+		jumpHeld = false; // let go of the swim stroke (see stopNavigation)
 	}
 }

@@ -16,8 +16,10 @@ public final class ControlHandlers {
 	private ControlHandlers() {}
 
 	public static void register(RpcRouter router) {
+		// Caller input, not task input: it overrules whatever step is running for a short renewable
+		// window, which is what makes a bot that is mid-walk steerable.
 		router.register("control.setInput", ctx -> {
-			BotController.get().setMovement(
+			BotController.get().setUserInput(
 					ctx.optBoolean("forward"),
 					ctx.optBoolean("back"),
 					ctx.optBoolean("left"),
@@ -25,7 +27,7 @@ public final class ControlHandlers {
 					ctx.optBoolean("jump"),
 					ctx.optBoolean("sneak"),
 					ctx.optBoolean("sprint"));
-			return Json.ok("input updated");
+			return Json.ok("input updated (holds for ~10 ticks; call again to keep it)");
 		});
 
 		router.register("control.stop", ctx -> {

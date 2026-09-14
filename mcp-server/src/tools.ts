@@ -749,9 +749,9 @@ export const TOOLS: ToolDef[] = [
   {
     name: "mine_block",
     method: "action.mineBlock",
-    title: "Mine a block (blocking)",
+    title: "Mine a block (returns immediately)",
     description:
-      "Client-only, BLOCKING. One block, start to finish: walk into reach (A*), face it, auto-select the best tool in the hotbar, mine with realistic survival timing, and return when it is gone. Returns state mined / unreachable / timeout. " +
+      "Client-only, NON-BLOCKING. One block, start to finish: walk into reach (A*), face it, auto-select the best tool in the hotbar, mine with realistic survival timing, and return when it is gone. Returns state mined / unreachable / timeout. " +
       "It mines exactly the one block you named — it does not follow a vein or fell a tree for you. Give x/y/z, or 'target' (e.g. looking_at the log you can see)." +
       COMPOSE_NOTE +
       OBSERVE_NOTE,
@@ -827,9 +827,9 @@ export const TOOLS: ToolDef[] = [
   {
     name: "eat",
     method: "action.eat",
-    title: "Eat food until full (blocking)",
+    title: "Eat food until full (returns immediately)",
     description:
-      "Client-only, BLOCKING. Hold the use key on the best food in the hotbar until the hunger bar is full (or no food is left). Uses the vanilla eating timing.",
+      "Client-only, NON-BLOCKING. Hold the use key on the best food in the hotbar until the hunger bar is full (or no food is left). Uses the vanilla eating timing.",
     inputSchema: {
       timeoutSeconds: z.number().int().min(1).max(60).optional().default(20),
       waitSeconds: waitSeconds(60),
@@ -839,9 +839,9 @@ export const TOOLS: ToolDef[] = [
   {
     name: "swing_at_entity",
     method: "action.swing",
-    title: "Hit an entity (blocking, short)",
+    title: "Hit an entity (returns immediately)",
     description:
-      "Client-only, BLOCKING. One module, no policy: aim at the entity and swing until 'hits' hits land or the budget runs out. It never walks, never strafes and never picks a target — closing the distance is a move_to, stepping back is a move_to, and 'keep hitting until it dies' is calling this again. " +
+      "Client-only, NON-BLOCKING. One module, no policy: aim at the entity and swing until 'hits' hits land or the budget runs out. It never walks, never strafes and never picks a target — closing the distance is a move_to, stepping back is a move_to, and 'keep hitting until it dies' is calling this again. " +
       "Only swings when the target is within reach and the attack cooldown is charged, so every hit is a full-damage one. " +
       "Give 'uuid', or 'target' — nearest_hostile is the usual one when something is chewing on you and you would rather not look up its id. " +
       "Returns state 'hit' (hits met) / 'killed' / 'out_of_reach' (it moved — close the gap yourself) / 'budget' / 'target_gone' / 'not_found', plus 'damageDealt' measured from the target's health bar." +
@@ -858,9 +858,9 @@ export const TOOLS: ToolDef[] = [
   {
     name: "retreat_from",
     method: "action.retreat",
-    title: "Back away from something (blocking, short)",
+    title: "Back away from something (returns immediately)",
     description:
-      "Client-only, BLOCKING. Withdraw roughly 'distance' blocks, on the far side of the player from the " +
+      "Client-only, NON-BLOCKING. Withdraw roughly 'distance' blocks, on the far side of the player from the " +
       "given entity or coordinate, then stop. Picks shelter that is walkable — it will not back into " +
       "water or off a ledge — and re-aims around the arc when the way straight back is blocked. " +
       "Returns state 'withdrew' / 'no_threat' (the thing is gone) / 'no_room' / 'no_path' / 'timeout'. " +
@@ -880,9 +880,9 @@ export const TOOLS: ToolDef[] = [
   {
     name: "surface",
     method: "action.surface",
-    title: "Swim up for air (blocking, short)",
+    title: "Swim up for air (returns immediately)",
     description:
-      "Client-only, BLOCKING. Swim straight up until the head is out of the water and the air bar has " +
+      "Client-only, NON-BLOCKING. Swim straight up until the head is out of the water and the air bar has " +
       "refilled, then return. No walking, no sprinting, so it rises instead of drifting sideways. " +
       "Returns state 'surfaced' / 'not_in_water' / 'timeout'. " +
       "There is deliberately no drowning reflex in the mod — observe publishes 'air' and " +
@@ -897,9 +897,9 @@ export const TOOLS: ToolDef[] = [
   {
     name: "water_bucket_save",
     method: "action.mlg",
-    title: "Water-bucket fall save (blocking, short)",
+    title: "Water-bucket fall save (returns immediately)",
     description:
-      "Client-only, BLOCKING. The 'MLG water' save, on demand: waits until the ground is inside placing " +
+      "Client-only, NON-BLOCKING. The 'MLG water' save, on demand: waits until the ground is inside placing " +
       "range, empties a water bucket straight down, lands in it, then scoops the source back up and " +
       "restores the hotbar slot. Needs a water_bucket in the hotbar. " +
       "Returns state 'saved' / 'nothing_to_save' (already on the ground) / 'no_water_bucket' / " +

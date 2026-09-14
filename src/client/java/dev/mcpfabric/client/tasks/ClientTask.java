@@ -102,6 +102,15 @@ public abstract class ClientTask {
 		if (!isDone()) settle(ClientTaskStatus.FAILED, detail, null);
 	}
 
+	/**
+	 * Force-settle as cancelled. Distinct from {@link #fail}: the task did not go wrong, the caller
+	 * withdrew the instruction — either by cancelling it or by asking for something else instead. A
+	 * caller that cannot tell those apart will retry a task that was deliberately stopped.
+	 */
+	public final void stampCancelled(String detail) {
+		if (!isDone()) settle(ClientTaskStatus.CANCELLED, detail, null);
+	}
+
 	private void settle(ClientTaskStatus st, String detail, JsonObject extra) {
 		JsonObject o = new JsonObject();
 		o.addProperty("state", st.name().toLowerCase());

@@ -50,7 +50,7 @@ public final class TaskManager {
 			} catch (Throwable ignored) {
 				// best effort: a superseded task gets no say in the matter
 			}
-			previous.fail("superseded");
+			previous.stampCancelled("superseded by " + task.describe());
 			observer.note("superseded " + superseded);
 		}
 		current = task;
@@ -143,7 +143,7 @@ public final class TaskManager {
 		} catch (Throwable ignored) {
 			// best effort
 		}
-		t.fail("cancelled");
+		t.stampCancelled("cancelled on request");
 		observer.note("cancelled " + t.describe());
 	}
 
