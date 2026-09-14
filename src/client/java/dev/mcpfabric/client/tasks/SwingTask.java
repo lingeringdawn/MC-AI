@@ -9,6 +9,7 @@ import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
@@ -47,6 +48,8 @@ public final class SwingTask extends ClientTask {
 	private int critCooldown;
 	private int swings;
 	private boolean seen;
+	/** Target health when we first got in range — the honest measure of what we actually did. */
+	private float startHealth = -1.0F;
 
 	public SwingTask(UUID target, int budgetSwings) {
 		this.target = target;
@@ -69,6 +72,7 @@ public final class SwingTask extends ClientTask {
 			return;
 		}
 		seen = true;
+		if (startHealth < 0.0F && e instanceof LivingEntity le0) startHealth = le0.getHealth();
 		if (!e.isAlive()) {
 			release();
 			finish("killed");
@@ -200,6 +204,13 @@ public final class SwingTask extends ClientTask {
 	private void finish(String state) {
 		JsonObject extra = new JsonObject();
 		extra.addProperty("swings", swings);
+		// Report the damage the target actually took, not just how often we clicked: a swing the
+		// server rejects as out of range is not a hit, and only the health bar knows the difference.
+		if (startHealth >= 0.0F) {
+			Entity e = EntityLookup.find(Minecraft.getInstance().level, target);
+			float now = e instanceof LivingEntity le ? le.getHealth() : 0.0F;
+			extra.addProperty("damageDealt", round(Math.max(0.0F, startHealth - now)));
+		}
 		done(state, extra);
 	}
 

@@ -1,6 +1,7 @@
 package dev.mcpfabric.client;
 
 import com.google.gson.JsonObject;
+import dev.mcpfabric.McpFabric;
 import dev.mcpfabric.client.nav.AStarPathfinder;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Options;
@@ -114,6 +115,8 @@ public final class BotController {
 	private static final float MOVE_ALIGN_DEG = 60.0F;
 	/** Randomised jump hold, so no two hops are identical. */
 	private final java.util.Random jumpRng = new java.util.Random();
+	/** Water-bucket fall save. Runs before steering and takes over while it is saving us. */
+	private final FallGuard fallGuard = new FallGuard();
 
 	// --- public control surface (called from handlers, on the render thread) ----------------
 
@@ -315,7 +318,10 @@ public final class BotController {
 				return;
 			}
 
-			if (path != null) {
+			// Fall protection runs first: while it is saving us it owns the movement keys and the
+			// crosshair, so skip steering for those ticks rather than fighting it for control.
+			boolean saving = McpFabric.config().enableFallSaving && fallGuard.tick(mc, p, this);
+			if (!saving && path != null) {
 				steer(mc, p);
 			}
 			applyWaterSafety(p);
@@ -529,22 +535,55 @@ public final class BotController {
 		fwd = facing;
 		back = left = right = false;
 
-		// Jump like a person: only from the ground, only once facing the way we are going, only for a
-		// real step up, and hold the key long enough to actually clear the block. The old one-tick tap
-		// produced a stunted hop that usually fell short, so the bot re-jumped on the spot instead of
-		// climbing — which is what read as "unnatural".
-		if (p.onGround() && facing) {
+		ClientLevel level = mc.level;
+		if (level == null) {
+			stopNavigationInternal("no_world");
+			return;
+		}
+
+		double ux = 0.0;
+		double uz = 0.0;
+		if (horiz >= 0.05) {
+			ux = dx / horiz;
+			uz = dz / horiz;
+		}
+		BlockPos aheadFeet = BlockPos.containing(p.getX() + ux, p.getY(), p.getZ() + uz);
+		boolean climbing = AStarPathfinder.isClimbable(level, p.blockPosition())
+				|| AStarPathfinder.isClimbable(level, aheadFeet);
+
+		// Decide to hop *before* we arrive, and from a sprint. That is how a person clears a step or a
+		// gap without slowing down: the jump is pressed a little early so the sprint momentum is
+		// already there, rather than arriving, stopping, and hopping from a standstill. Jumping only
+		// from the ground and only when facing the way we are going keeps it from looking twitchy.
+		if (!inWater && !climbing && p.onGround() && facing) {
+			BlockPos stepBlock = BlockPos.containing(p.getX() + ux * 1.1, p.getY(), p.getZ() + uz * 1.1);
+			BlockPos floorBlock = BlockPos.containing(p.getX() + ux * 1.1, p.getY() - 1.0, p.getZ() + uz * 1.1);
+			boolean stepUp = solid(level, stepBlock) && passable(level, stepBlock.above());
+			boolean holeAhead = passable(level, stepBlock) && !solid(level, floorBlock);
+			boolean nodeHigher = node.getY() > p.getY() + 0.5;
+			// A gap the path wants crossed: the landing node sits a couple of blocks away with nothing
+			// to walk on in between. Walking would drop us in, so this has to be a sprint-jump.
+			double nodeGap = horizOf(p, node);
+			boolean wideHop = holeAhead && nodeGap > 1.6 && nodeGap <= 4.2
+					&& Math.abs(node.getY() - p.getY()) <= 1.2;
+			if (stepUp || nodeHigher || wideHop) {
+				sprint = true;
+				jumpOnceTicks = Math.max(jumpOnceTicks, Humanizer.ticks(jumpRng, 4, 7));
+			}
+		}
+
+		if (inWater) {
+			// Stroke upward to climb, or to keep the head at the surface on a level swim. When the node
+			// is below, do NOT jump — that is how the bot dives to it.
 			boolean needHeight = node.getY() > p.getY() + 0.5;
 			boolean descending = node.getY() < p.getY() - 0.4;
-			if (inWater) {
-				// Stroke upward to climb, or to keep the head at the surface on a level swim. When the
-				// node is below, do NOT jump — that is how the bot dives to it.
-				if (needHeight || (p.isUnderWater() && !descending)) {
-					jumpOnceTicks = Math.max(jumpOnceTicks, Humanizer.ticks(jumpRng, 3, 6));
-				}
-			} else if (needHeight) {
+			if (needHeight || (p.isUnderWater() && !descending)) {
 				jumpOnceTicks = Math.max(jumpOnceTicks, Humanizer.ticks(jumpRng, 3, 6));
 			}
+		} else if (climbing) {
+			// On a ladder or vine the way up is to hold forward against it and keep pressing jump.
+			sprint = false;
+			if (node.getY() > p.getY() + 0.3) jumpOnceTicks = Math.max(jumpOnceTicks, 3);
 		}
 
 		// Stuck recovery ladder: hop -> re-plan -> give up. Nothing counts as stuck while we are still

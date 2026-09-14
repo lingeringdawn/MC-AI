@@ -42,6 +42,12 @@ public final class McpConfig {
 	 * machine-precise motion.
 	 */
 	public boolean enableHumanization = true;
+	/**
+	 * Let the bot save itself from a lethal fall by emptying a water bucket underneath it (the classic
+	 * "MLG water"), then scoop the water back up. Only fires when the drop would genuinely hurt, and
+	 * only when a water bucket is in the hotbar.
+	 */
+	public boolean enableFallSaving = true;
 
 	/**
 	 * Sample the world every tick while a blocking action runs, so callers can see health, nearby
