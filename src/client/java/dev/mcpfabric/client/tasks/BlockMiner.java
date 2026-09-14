@@ -1,14 +1,13 @@
 package dev.mcpfabric.client.tasks;
 
-import com.mojang.blaze3d.platform.InputConstants;
 import dev.mcpfabric.client.BotController;
 import dev.mcpfabric.client.Humanizer;
 import dev.mcpfabric.client.nav.AStarPathfinder;
-import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
@@ -106,10 +105,13 @@ final class BlockMiner {
 		}
 
 		aim(mc, p);
-		// Only dig once the crosshair is actually settled on the block. A tight per-tick tolerance
-		// makes the controller keep re-aiming and never press, so wait for the interpolated turn to
-		// arrive (isLookSettled) instead of re-issuing the aim forever.
-		if (!BotController.get().isLookSettled() && BotController.get().lookErrorDeg() > 3.0F) {
+		// Press only once the crosshair is actually on the block: the click that starts a break uses
+		// vanilla's own hit result, and the ray clip further down only proves there is a clear line to
+		// the block, which is not the same question. This is checked against that same hit result rather
+		// than an angle threshold — a threshold can stay unsatisfied for as long as the aim is still
+		// turning, and then the dig never starts at all, which is how a miner can sit on a block for its
+		// entire budget without ever taking a swing at it.
+		if (!crosshairOn(mc, pos)) {
 			settleTicks = 0;
 			stopDigging();
 			return State.WORKING;
@@ -194,14 +196,20 @@ final class BlockMiner {
 	 * progressed and finished by exactly the code that runs when a player holds the button.
 	 */
 	private void dig(Minecraft mc, BlockPos target) {
-		// The controller applies this to the real key every tick, so the button stays down.
+		// The controller applies this to the real key every tick, so the button stays down and vanilla's
+		// own held-button branch is what carries the break on from here.
 		BotController.get().setAttackHeld(true);
 		if (!target.equals(digging)) {
 			digging = target.immutable();
-			// One press edge per block: this is what makes vanilla start breaking it at all. It is the
-			// same call the mouse handler makes on a real left click (button 0), which is why it reaches
-			// the attack binding rather than a copy of it.
-			KeyMapping.click(InputConstants.Type.MOUSE.getOrCreate(0));
+			// One press edge per block, and this is the only part done by hand: it is the same call
+			// vanilla's startAttack() makes on a real left click. Holding the key alone does not start a
+			// break (with the button merely down, the attack just reads as held and the destroy progress
+			// never leaves zero), and calling continueDestroyBlock ourselves produced a break the server
+			// never agreed to — the block went, the drops did not. Start by hand, continue by vanilla.
+			Direction face = mc.hitResult instanceof BlockHitResult hit && hit.getType() == HitResult.Type.BLOCK
+					? hit.getDirection() : Direction.UP;
+			mc.gameMode.startDestroyBlock(target, face);
+			mc.options.keyAttack.setDown(true);
 		}
 	}
 
@@ -273,5 +281,15 @@ final class BlockMiner {
 	private static boolean isNavigating() {
 		var s = BotController.get().statusJson();
 		return s.has("active") && s.get("active").getAsBoolean();
+	}
+
+	/**
+	 * True when vanilla's crosshair — the thing a click would target — is resting on this block. Shared
+	 * with the task's progress so "is it aimed yet" is answered by the same question the game asks.
+	 */
+	static boolean crosshairOn(Minecraft mc, BlockPos target) {
+		return mc.hitResult instanceof BlockHitResult hit
+				&& hit.getType() == HitResult.Type.BLOCK
+				&& target.equals(hit.getBlockPos());
 	}
 }
