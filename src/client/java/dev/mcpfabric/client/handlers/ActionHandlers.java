@@ -15,6 +15,8 @@ import dev.mcpfabric.client.tasks.AttackTask;
 import dev.mcpfabric.client.tasks.ClientTask;
 import dev.mcpfabric.client.tasks.CraftTask;
 import dev.mcpfabric.client.tasks.DigTask;
+import dev.mcpfabric.client.tasks.Latency;
+import dev.mcpfabric.client.tasks.Memory;
 import dev.mcpfabric.client.tasks.MoveToTask;
 import dev.mcpfabric.client.tasks.ParkedPlan;
 import dev.mcpfabric.client.tasks.PlanTask;
@@ -63,6 +65,11 @@ public final class ActionHandlers {
 
 		registerPlan(router);
 		registerParkedPlan(router);
+		registerMemory(router);
+
+		// One hook on the dispatcher times how long the caller takes to answer what it was shown. No
+		// per-call instrumentation, and nothing in it decides anything.
+		router.onDispatch(Latency::called);
 
 		// The caller's own reflexes. The mod supplies the loop and nothing else: the conditions and the
 		// actions are the caller's sentences, replaced wholesale by the next rules.set, and every firing
@@ -113,6 +120,31 @@ public final class ActionHandlers {
 		router.register("action.do", ctx -> run(ctx,
 				ctx2 -> plan(router, ctx2.params()),
 				ctx.optInt("timeoutSeconds", 120)));
+	}
+
+	/**
+	 * What the caller has learned, and how fast it has been reacting.
+	 *
+	 * <p>Memory is the only thing in this mod that survives a restart. It exists because everything else
+	 * forgets: the same pond drowned the bot twice, the same hidden trunk took three attempts to see, and
+	 * the same sequence was rewritten every session, because there was nowhere for a lesson to live. The
+	 * caller writes the content and does the deciding — nothing here summarises, scores or auto-writes.
+	 *
+	 * <p>Latency is the matching measurement: how long between something being reported and the first
+	 * action taken about it. A claim that behaviour is getting smoother is not evidence; this is.
+	 */
+	private static void registerMemory(RpcRouter router) {
+		router.register("memory.set", ctx -> Memory.set(ctx.params()));
+		router.register("memory.get", ctx -> Memory.get(param(ctx, "key")));
+		router.register("memory.list", ctx -> Memory.list(param(ctx, "kind"), param(ctx, "filter")));
+		router.register("memory.delete", ctx -> Memory.delete(param(ctx, "key")));
+		router.register("memory.clear", ctx -> Memory.clear());
+		router.register("latency.stats", ctx -> Latency.stats());
+	}
+
+	private static String param(RpcContext ctx, String key) {
+		JsonObject p = ctx.params();
+		return p.has(key) && p.get(key).isJsonPrimitive() ? p.get(key).getAsString() : null;
 	}
 
 	/**
@@ -240,6 +272,18 @@ public final class ActionHandlers {
 				+ "'the plan I was in the middle of', not a queue.");
 		o.addProperty("rules", "rules.set replaces the whole set; rules.list shows it; each firing is "
 				+ "reported in the stream as an event with kind 'rule'.");
+		o.addProperty("memory", "memory.set/get/list/delete/clear — the only thing that survives a restart. "
+				+ "The mod stores what you write and forms no opinion of its own: no summary, no scoring, no "
+				+ "auto-written lessons (an auto-written lesson would be the mod deciding what matters). Read "
+				+ "memory.list FIRST on a new session: whatever was expensive to work out last time is exactly "
+				+ "what should not be worked out again. 'writes' counts revisions — a lesson revised five times "
+				+ "is still not right. A 'procedure' whose steps pin x/y/z comes back with a warning, because "
+				+ "symbolic targets (visible_log, nearest_drop, looking_at) keep it working when the world moves.");
+		o.addProperty("fluency", "observe.now.latency, and latency.stats, is the reaction reading: 'incident' "
+				+ "is the time from an anomaly being reported to the first action submitted afterwards, 'loop' "
+				+ "is from a read to the next action, both as medians over the last 20. Reading is not "
+				+ "answering — action.status and action.observe are reads, and while one is open the snapshot "
+				+ "shows openForMs. This is the number that says whether operating is getting more fluid.");
 		o.addProperty("noPolicy", "None of these modules decides anything. Each does the one physical thing "
 				+ "it is named for, reports what happened and stops. There is no 'chop a tree', no 'kill that "
 				+ "mob', no refusal and no preference — the composing is yours, and the only standing "

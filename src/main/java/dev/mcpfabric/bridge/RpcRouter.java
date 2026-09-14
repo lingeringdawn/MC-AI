@@ -8,6 +8,7 @@ import dev.mcpfabric.McpFabric;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
 /**
  * Registry + dispatcher for RPC methods. Thread-safe: handlers can be registered from both the
@@ -15,6 +16,16 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class RpcRouter {
 	private final Map<String, RpcHandler> handlers = new ConcurrentHashMap<>();
+	/**
+	 * Told the method name of every dispatch before it runs. The client side uses it to time its own
+	 * reaction loop (how long between seeing something and acting on it); the bridge neither knows nor
+	 * cares what the listener does, and a listener that throws never breaks a call.
+	 */
+	private volatile Consumer<String> dispatchListener;
+
+	public void onDispatch(Consumer<String> listener) {
+		this.dispatchListener = listener;
+	}
 
 	public void register(String method, RpcHandler handler) {
 		if (handlers.putIfAbsent(method, handler) != null) {
@@ -41,6 +52,14 @@ public final class RpcRouter {
 		RpcHandler handler = handlers.get(method);
 		if (handler == null) {
 			return Json.envelopeError("unknown_method", "No such method: " + method, null);
+		}
+		Consumer<String> listener = dispatchListener;
+		if (listener != null) {
+			try {
+				listener.accept(method);
+			} catch (Throwable ignored) {
+				// a listener must never be able to break a call
+			}
 		}
 		try {
 			JsonElement result = handler.handle(new RpcContext(method, params));

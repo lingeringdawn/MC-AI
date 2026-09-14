@@ -59,13 +59,6 @@ public final class McpConfig {
 	 * decides nothing, it only tells the caller what is going on.
 	 */
 	public boolean enableTaskObservation = true;
-	/**
-	 * Opt-in: act on the worst anomaly the observation reports — surface, water-bucket a lethal fall,
-	 * eat when starving, withdraw from a mob — instead of only naming it and leaving the caller to
-	 * respond. Off by default, so the mod reports rather than acts; even when on it never interrupts a
-	 * task the caller asked for, and only fires in the gaps between actions.
-	 */
-	public boolean autoHandleAnomalies = false;
 
 	public transient Path source;
 

@@ -214,6 +214,11 @@ public final class TaskObserver {
 		// a caller deciding what to do next needs the same view the player has, not a chunk scan.
 		o.add("visible", visibleSummary(mc));
 
+		// --- how quickly the caller has been answering, live -----------------
+		// Small enough to ride along every tick, and the one number that says whether operating is getting
+		// more fluid: from something being reported to the first action taken about it.
+		o.add("latency", Latency.snapshot());
+
 		// --- threats ---------------------------------------------------------
 		sampleThreats(p, level, o);
 
@@ -356,8 +361,10 @@ public final class TaskObserver {
 		for (String id : raw) {
 			if (knownAnomalies.contains(id)) continue;
 			JsonObject a = found.getAsJsonObject(id);
-			String remedy = a.has("remedy") ? " -> call " + a.get("remedy").getAsString() : "";
-			note("anomaly: " + id + " (" + a.get("evidence").getAsString() + ")" + remedy);
+			note("anomaly: " + id + " (" + a.get("evidence").getAsString() + ")");
+			// This is the moment the clock starts for the caller's reaction time: the instant the problem
+			// became visible, not the instant it began. Whether an answer follows is measured in Latency.
+			if (a.get("severity").getAsInt() >= 1) Latency.sighted(id + ": " + a.get("evidence").getAsString());
 		}
 		for (String id : knownAnomalies) {
 			if (!raw.contains(id)) note("cleared: " + id);

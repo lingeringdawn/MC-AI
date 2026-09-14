@@ -121,7 +121,11 @@ const OBSERVE_NOTE =
   '"progress", and a rolling "log" of notable moments — so the world is visible during the action instead of only ' +
   'after it. Watch with action_status / observe and read observe.danger (0 fine / 1 caution / 2 act now). To change ' +
   'course you do not need permission or a cancel first: the next action you send supersedes whatever is running, ' +
-  'and action_cancel stops it outright and reports it as cancelled.';
+  'and action_cancel stops it outright and reports it as cancelled. ' +
+  'Two things ride along in every snapshot that are about you rather than the world: now.latency — how ' +
+  'long between something being reported and your first action about it (observe.now.latency.openForMs is ' +
+  'an incident still unanswered) — and, across sessions, the memory layer, which is the only thing that ' +
+  'survives a restart. Read memory_list first on a new session, and write down what was expensive to work out.';
 
 // ----- catalogue ------------------------------------------------------------------------------
 
@@ -1016,6 +1020,102 @@ export const TOOLS: ToolDef[] = [
       "conditions a rule can use; the plan limit; and how the watch stream works. Read this once instead " +
       "of inferring the API from a pile of tool descriptions — it is generated next to the modules " +
       "themselves, so it cannot drift from them.",
+    inputSchema: {},
+    annotations: READ,
+  },
+
+  {
+    name: "memory_set",
+    method: "memory.set",
+    title: "Write down what you learned (replaces by key)",
+    description:
+      "Client-only. THE ONLY THING THAT SURVIVES A RESTART — everything else in this mod forgets: the watch " +
+      "stream slides, the log rolls, the task manager keeps one task, and the next session starts blank. " +
+      "Use it for whatever was expensive to work out, so it is not worked out again: where the trees are " +
+      "and how to reach them (kind 'fact'), what went wrong and why (kind 'lesson'), a way of doing " +
+      "something as steps (kind 'procedure' with data.steps), what you are currently after (kind 'goal'). " +
+      "Same key = REVISE (text replaced, writes incremented), which is how a lesson gets sharpened instead " +
+      "of duplicated — and 'writes' climbing on one lesson is a sign it is still not right.\n" +
+      "The mod stores what you write and forms no opinion of its own: no summary, no scoring, no " +
+      "auto-written lessons. A procedure whose steps pin x/y/z comes back with a warning — symbolic targets " +
+      "(`visible_log`, `nearest_drop`, `looking_at`) keep the same procedure working when the world moves.",
+    inputSchema: {
+      entries: z
+        .array(
+          z
+            .object({
+              key: z.string().describe("The address. Writing this key again revises it."),
+              kind: z.string().optional().describe("Your vocabulary: fact / lesson / procedure / goal. Default 'fact'."),
+              text: z.string().optional().describe("What you want to read back. Keep it to what is worth re-reading."),
+              data: z.record(z.string(), z.unknown()).optional().describe("Optional structure, e.g. {steps:[...]} for a procedure."),
+            })
+            .passthrough(),
+        )
+        .min(1)
+        .max(50),
+    },
+    annotations: WRITE,
+  },
+  {
+    name: "memory_get",
+    method: "memory.get",
+    title: "Read back one memory (or the whole index)",
+    description:
+      "Client-only, READ-ONLY. One entry in full by key, or the index when no key is given. Read this at the " +
+      "start of a session: whatever you learned in the last one is sitting here, and nothing in the world " +
+      "will remind you of it.",
+    inputSchema: {
+      key: z.string().optional().describe("Omit for the index of keys, kinds and revision counts."),
+    },
+    annotations: READ,
+  },
+  {
+    name: "memory_list",
+    method: "memory.list",
+    title: "Everything I have learned",
+    description:
+      "Client-only, READ-ONLY. Keys, kinds, how often each was revised, and the start of each text — the " +
+      "reading to take before deciding anything, and cheap enough to take every session. Filter by kind " +
+      "('fact' / 'lesson' / 'procedure' / 'goal') or by a word in the text.",
+    inputSchema: {
+      kind: z.string().optional(),
+      filter: z.string().optional().describe("Case-insensitive word to look for in the key or the text."),
+    },
+    annotations: READ,
+  },
+  {
+    name: "memory_delete",
+    method: "memory.delete",
+    title: "Forget one memory",
+    description:
+      "Client-only. Drop one entry by key — use it when a fact stops being true (the tree came down) or a " +
+      "lesson was wrong. A memory nobody prunes stops being read.",
+    inputSchema: {
+      key: z.string(),
+    },
+    annotations: WRITE,
+  },
+  {
+    name: "memory_clear",
+    method: "memory.clear",
+    title: "Forget everything",
+    description:
+      "Client-only. Wipe the whole memory. Nothing the mod derived is stored alongside it, so nothing else " +
+      "is lost — but this is every lesson in one call, so mean it.",
+    inputSchema: {},
+    annotations: WRITE,
+  },
+  {
+    name: "latency_stats",
+    method: "latency.stats",
+    title: "How fast have I been reacting",
+    description:
+      "Client-only, READ-ONLY. The fluidity reading, and the one that cannot be argued with. 'incident' is " +
+      "the time from an anomaly first being reported to the first action submitted afterwards; 'loop' is " +
+      "from a read to the next action; both as medians and maxima over the last 20, plus the full windows " +
+      "and totals. Reading is not answering — action_status / observe are reads, and if one is open with no " +
+      "action after it, this says so (openForMs / overdue). Watch the incident median fall as lessons " +
+      "accumulate: that is what 'behaviour got smoother' actually looks like.",
     inputSchema: {},
     annotations: READ,
   },
