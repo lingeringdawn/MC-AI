@@ -45,12 +45,6 @@ const dimensionOpt = {
     .describe('Dimension id, e.g. "minecraft:overworld", "minecraft:the_nether". Defaults to the current/overworld dimension.'),
 };
 
-const playerRef = {
-  player: z
-    .string()
-    .describe('Target player by name or UUID. Use "@all" where broadcasting is meaningful.'),
-};
-
 const READ = { readOnlyHint: true } as const;
 const WRITE = { destructiveHint: true } as const;
 
@@ -93,7 +87,7 @@ export const TOOLS: ToolDef[] = [
     method: "info.status",
     title: "Server/client status",
     description:
-      "Get the current state of the running game: mod & Minecraft version, which side this bridge runs on (client / dedicated_server), whether an integrated server is present, whether the player is in a world, current dimension, and the list of available capability groups. Call this first to learn what you can do right now.",
+      "Get the current state of the running game: mod & Minecraft version, whether the player is in a world, and the list of available capability groups. The mod is client-side only, so it works on any server without operator rights. Call this first to learn what you can do right now.",
     inputSchema: {},
     annotations: READ,
   },
@@ -113,7 +107,8 @@ export const TOOLS: ToolDef[] = [
     method: "world.getBlock",
     title: "Get block at position",
     description:
-      "Read the block at an exact integer position: its block id, blockstate properties, whether it is air/fluid/solid, light levels, and hardness. Requires a loaded chunk.",
+      "Read the block at an exact integer position: its block id, blockstate properties, whether it is air/fluid/solid, light levels, and hardness. " +
+      "Read from the client's own loaded view, so it needs no server access; positions outside loaded chunks are reported as unavailable rather than guessed.",
     inputSchema: { ...vec3(), ...dimensionOpt },
     annotations: READ,
   },
@@ -159,74 +154,12 @@ export const TOOLS: ToolDef[] = [
   {
     name: "list_dimensions",
     method: "world.getDimensions",
-    title: "List dimensions",
-    description: "List all dimensions present on the server and which one the player is currently in.",
+    title: "Current dimension",
+    description:
+      "Report the dimension the player is currently in. Only the current dimension is known: a client has no access to dimensions it is not inside.",
     inputSchema: {},
     annotations: READ,
   },
-  {
-    name: "raycast",
-    method: "world.raycast",
-    title: "Raycast from a point",
-    description:
-      "Cast a ray and report the first block and/or entity it hits. Provide either an explicit direction vector or yaw/pitch angles. Great for 'what am I looking at' and line-of-sight checks.",
-    inputSchema: {
-      origin: z.object(vec3()).describe("Ray start position (usually an eye position)."),
-      direction: z.object(vec3()).optional().describe("Ray direction vector (need not be normalized). Use this OR yaw/pitch."),
-      yaw: z.number().optional().describe("Yaw in degrees (Minecraft convention). Use with pitch instead of direction."),
-      pitch: z.number().optional().describe("Pitch in degrees (-90 up .. 90 down)."),
-      maxDistance: z.number().min(0.1).max(256).optional().default(32).describe("Maximum ray length in blocks."),
-      includeFluids: z.boolean().optional().default(false).describe("Treat fluids as hittable."),
-      includeEntities: z.boolean().optional().default(true).describe("Also test entities along the ray."),
-      ...dimensionOpt,
-    },
-    annotations: READ,
-  },
-
-  // ===== world (write) =======================================================================
-  {
-    name: "set_block",
-    method: "world.setBlock",
-    title: "Set a block",
-    description:
-      "Place/replace the block at an exact position with the given block id (optionally with blockstate properties as a string like 'minecraft:oak_log[axis=y]'). Requires a server (integrated client or dedicated).",
-    inputSchema: { ...vec3(), blockId: z.string().describe('Block id, optionally with state, e.g. "minecraft:stone" or "minecraft:oak_stairs[facing=east]".'), ...dimensionOpt },
-    annotations: WRITE,
-  },
-  {
-    name: "fill_blocks",
-    method: "world.fill",
-    title: "Fill a region with a block",
-    description:
-      "Fill the cuboid between two corners with one block id. Volume is capped for safety. Requires a server.",
-    inputSchema: {
-      from: z.object(vec3()),
-      to: z.object(vec3()),
-      blockId: z.string().describe("Block id to fill with."),
-      ...dimensionOpt,
-    },
-    annotations: WRITE,
-  },
-  {
-    name: "set_time",
-    method: "world.setTime",
-    title: "Set time of day",
-    description: "Set the day-time (0-24000; 0=dawn, 6000=noon, 12000=dusk, 18000=midnight). Requires a server.",
-    inputSchema: { time: z.number().int().min(0).max(24000).describe("Day-time in ticks (0-24000).") },
-    annotations: WRITE,
-  },
-  {
-    name: "set_weather",
-    method: "world.setWeather",
-    title: "Set weather",
-    description: "Set the weather. Requires a server.",
-    inputSchema: {
-      weather: z.enum(["clear", "rain", "thunder"]).describe("Target weather."),
-      durationSeconds: z.number().int().min(1).optional().describe("How long the weather should last."),
-    },
-    annotations: WRITE,
-  },
-
   // ===== entities ============================================================================
   {
     name: "query_entities",
@@ -253,115 +186,6 @@ export const TOOLS: ToolDef[] = [
     inputSchema: { uuid: z.string().describe("Entity UUID.") },
     annotations: READ,
   },
-  {
-    name: "summon_entity",
-    method: "entities.summon",
-    title: "Summon entity",
-    description: "Summon an entity of the given type at a position, optionally with SNBT data. Requires a server.",
-    inputSchema: {
-      type: z.string().describe('Entity type id, e.g. "minecraft:armor_stand".'),
-      ...vec3(),
-      nbt: z.string().optional().describe("Optional SNBT, e.g. '{NoGravity:1b}'."),
-      ...dimensionOpt,
-    },
-    annotations: WRITE,
-  },
-  {
-    name: "remove_entity",
-    method: "entities.remove",
-    title: "Remove entity",
-    description: "Discard (remove) a non-player entity by UUID. Requires a server.",
-    inputSchema: { uuid: z.string().describe("Entity UUID to remove.") },
-    annotations: WRITE,
-  },
-
-  // ===== players (admin, server-side) ========================================================
-  {
-    name: "list_players",
-    method: "players.list",
-    title: "List online players",
-    description: "List all online players with name, UUID, position, dimension, health, food, game mode and ping. Requires a server.",
-    inputSchema: {},
-    annotations: READ,
-  },
-  {
-    name: "get_player",
-    method: "players.get",
-    title: "Get player details",
-    description: "Get detailed state for one online player. Requires a server.",
-    inputSchema: { ...playerRef },
-    annotations: READ,
-  },
-  {
-    name: "teleport_player",
-    method: "players.teleport",
-    title: "Teleport player",
-    description: "Teleport a player to coordinates (and optionally another dimension / facing). Requires a server.",
-    inputSchema: { ...playerRef, ...vec3(), yaw: z.number().optional(), pitch: z.number().optional(), ...dimensionOpt },
-    annotations: WRITE,
-  },
-  {
-    name: "set_gamemode",
-    method: "players.setGameMode",
-    title: "Set player game mode",
-    description: "Set a player's game mode. Requires a server.",
-    inputSchema: { ...playerRef, mode: z.enum(["survival", "creative", "adventure", "spectator"]) },
-    annotations: WRITE,
-  },
-  {
-    name: "give_item",
-    method: "players.give",
-    title: "Give item to player",
-    description: "Give an item stack to a player. Requires a server.",
-    inputSchema: {
-      ...playerRef,
-      itemId: z.string().describe('Item id, e.g. "minecraft:diamond".'),
-      count: z.number().int().min(1).max(6400).optional().default(1),
-      nbt: z.string().optional().describe("Optional SNBT components."),
-    },
-    annotations: WRITE,
-  },
-  {
-    name: "apply_effect",
-    method: "players.applyEffect",
-    title: "Apply status effect",
-    description: "Apply a potion/status effect to a player. Requires a server.",
-    inputSchema: {
-      ...playerRef,
-      effectId: z.string().describe('Effect id, e.g. "minecraft:speed".'),
-      durationSeconds: z.number().int().min(1).optional().default(30),
-      amplifier: z.number().int().min(0).max(255).optional().default(0),
-      showParticles: z.boolean().optional().default(true),
-    },
-    annotations: WRITE,
-  },
-  {
-    name: "message_player",
-    method: "players.message",
-    title: "Send system message",
-    description: 'Send a system/chat message to a player ("@all" to broadcast). Requires a server.',
-    inputSchema: { ...playerRef, text: z.string() },
-  },
-  {
-    name: "kick_player",
-    method: "players.kick",
-    title: "Kick player",
-    description: "Kick a player from the server. Requires a dedicated server.",
-    inputSchema: { ...playerRef, reason: z.string().optional() },
-    annotations: WRITE,
-  },
-
-  // ===== command =============================================================================
-  {
-    name: "run_command",
-    method: "command.run",
-    title: "Run a server command",
-    description:
-      "Execute an arbitrary Minecraft command at operator permission level 4 (do NOT include the leading slash) and capture its feedback output. This is extremely powerful (/setblock, /summon, /give, /tp, /gamerule, /execute, datapacks, ...). Requires a server.",
-    inputSchema: { command: z.string().describe('Command without the leading slash, e.g. "time set day".') },
-    annotations: { destructiveHint: true, openWorldHint: true },
-  },
-
   // ===== chat ================================================================================
   {
     name: "send_chat",
@@ -791,7 +615,10 @@ export const TOOLS: ToolDef[] = [
     method: "events.getRecent",
     title: "Poll recent game events",
     description:
-      "Return recently observed game events from the in-mod ring buffer (damage taken, entity spawn/death, block break/place, chat, dimension change, etc.). Filter by type and/or pass sinceId to get only events newer than one you've already seen.",
+      'Return recently observed events from the in-mod ring buffer. These are the events a client can see for itself: ' +
+      '"chat" and "system_message" (messages received), "player_damage" and "player_death" (your own health dropping, ' +
+      'derived client-side), and "dimension_change". Filter by type and/or pass sinceId to get only events newer than one ' +
+      "you have already seen.",
     inputSchema: {
       limit: z.number().int().min(1).max(500).optional().default(50),
       types: z.array(z.string()).optional().describe('Event type filter, e.g. ["chat","player_damage","entity_death"].'),

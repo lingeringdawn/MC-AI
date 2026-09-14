@@ -3,7 +3,7 @@
 	"id": "mcpfabric",
 	"version": "${version}",
 	"name": "MCP Fabric",
-	"description": "Exposes full read & control access to Minecraft through an embedded HTTP bridge, designed to be driven by an MCP server so AI agents can observe and control the game.",
+	"description": "Exposes the local player and the world it can see through an embedded HTTP bridge, designed to be driven by an MCP server so AI agents can observe and act. Client-side only: it never requires server or operator access.",
 	"authors": [
 		"dabinayo"
 	],
@@ -14,11 +14,8 @@
 	},
 	"icon": "assets/mcpfabric/icon.png",
 	"license": "MIT",
-	"environment": "*",
+	"environment": "client",
 	"entrypoints": {
-		"main": [
-			"dev.mcpfabric.McpFabric"
-		],
 		"client": [
 			"dev.mcpfabric.client.McpFabricClient"
 		]

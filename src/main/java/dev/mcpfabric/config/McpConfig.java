@@ -14,6 +14,10 @@ import java.util.UUID;
  * Persistent configuration for the bridge, stored at {@code config/mcpfabric.config.json}.
  * An auth token is generated on first run and remains in the config file so it does not leak into
  * logs. Copy it into the MCP server's {@code MCPFABRIC_TOKEN} environment variable.
+ *
+ * <p>Every switch here controls a <em>client</em> behaviour. There are no "enable cheating" flags,
+ * because the mod no longer has any privileged capability to gate: it can only do what the player
+ * sitting at the keyboard could do.
  */
 public final class McpConfig {
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
@@ -30,10 +34,9 @@ public final class McpConfig {
 	public int callTimeoutMs = 8000;
 
 	// capability gates ------------------------------------------------------------------------
-	// Cheat-like powers are OFF by default: the AI must act through real player operations.
-	public boolean enableWorldWrite = false;
-	public boolean enableCommands = false;
+	/** Allow driving the local player: movement, look, mining, interaction, crafting, navigation. */
 	public boolean enablePlayerControl = true;
+	/** Allow capturing screenshots and structured scene descriptions. */
 	public boolean enableVision = true;
 	/**
 	 * Make the bot's input read as human rather than mechanical: eased mouse-look (fast flick, soft

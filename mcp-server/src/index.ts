@@ -100,10 +100,13 @@ function buildServer(bridge: BridgeClient): McpServer {
     { name: "mcpfabric", version: PKG_VERSION },
     {
       instructions:
-        "Control and observe a running Minecraft game (Fabric 1.21.x) through the mcpfabric mod. " +
-        "Call get_status first to learn which side you are on and which capability groups are available. " +
-        "Client-side tools (get_self, control_*, interact_*, vision, navigation) drive the local player; " +
-        "server-side tools (players_*, run_command, world write) require an integrated or dedicated server.",
+        "Observe and act in a running Minecraft game (Fabric 1.21.x) through the mcpfabric mod, which is " +
+        "client-side only: everything it does is something the player at that keyboard could do, so it " +
+        "works on any server with or without operator rights. Call get_status first to see which " +
+        "capability groups are available. Reading (world, entities, self, inventory, vision) reflects " +
+        "what the client has loaded, so anything outside loaded chunks is reported as unavailable " +
+        "rather than guessed. Acting (control_*, interact_*, inventory, navigation, move_to/mine_*/" +
+        "attack and friends) drives the local player through its normal input pipeline.",
     },
   );
   registerTools(server, bridge);
