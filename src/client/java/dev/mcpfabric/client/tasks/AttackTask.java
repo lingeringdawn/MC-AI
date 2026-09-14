@@ -12,34 +12,37 @@ import net.minecraft.world.entity.LivingEntity;
 import java.util.UUID;
 
 /**
- * Hit an entity: aim at it, and swing once it is in reach and the attack cooldown is charged.
+ * Land one hit. Aim at the entity, wait for the attack cooldown to be fully charged, swing, and wait for
+ * the cooldown to come back before settling.
  *
- * <p>One small module, no policy. It does not walk anywhere, does not strafe, does not decide when a
- * fight is won, and never picks its own target — "close the distance", "step back", "keep hitting until
- * it dies" are sequences the caller composes out of this and the movement modules. If the target drifts
- * out of reach it settles with {@code out_of_reach} and hands the decision straight back.
+ * <p>One swing is the unit here, not "fight this mob": it does not walk, does not strafe, does not decide
+ * when the fight is over and never picks its own target. Closing the distance is a {@code moveTo},
+ * stepping back is a {@code moveTo}, and carrying on is calling this again — which is the difference
+ * between a bot that can be interrupted mid-fight and one that has already committed to winning it.
  *
- * <p>The swing goes through {@code MultiPlayerGameMode.attack}, the same call the vanilla input
- * pipeline makes for a real click. Holding the attack key is not an option: vanilla repeats the
- * <em>block</em> branch while the button is held (which is why mining works) but the entity branch only
- * fires on a press edge, so a held key never lands on a mob at all.
+ * <p>It waits out the cooldown on both sides of the swing. Swinging before the bar is full lands a
+ * weakened hit, and returning before it refills leaves a half-charged attack behind for whoever calls
+ * next; either way the caller gets a hit that is worth a hit.
+ *
+ * <p>The swing goes through {@code MultiPlayerGameMode.attack}, the same call vanilla's input pipeline
+ * makes for a real click. Holding the attack key is not an option: vanilla repeats the <em>block</em>
+ * branch while the button is down (which is why digging works) but the entity branch only fires on a
+ * press edge, so a held key never lands on a mob at all.
  */
-public final class SwingTask extends ClientTask {
-	/** Only swing inside this range, so hits are not wasted on out-of-reach targets. */
-	private static final double SWING_RANGE = 3.0;
+public final class AttackTask extends ClientTask {
+	/** Only swing inside this range; beyond it a hit is wasted and the caller should move first. */
+	private static final double REACH = 3.0;
+	/** How charged the attack bar must be for a swing to count as a full-damage hit. */
+	private static final float FULL_CHARGE = 0.99F;
 
 	private final UUID target;
-	/** How many landed hits to make; 0 = keep swinging for the whole step budget. */
-	private final int hitsWanted;
-
-	private int hits;
 	private boolean seen;
-	/** Target health when we first got in range — the honest measure of what we actually did. */
+	private boolean swung;
+	/** Target health when it was first seen — the honest measure of what the hit actually did. */
 	private float startHealth = -1.0F;
 
-	public SwingTask(UUID target, int hitsWanted) {
+	public AttackTask(UUID target) {
 		this.target = target;
-		this.hitsWanted = hitsWanted;
 	}
 
 	@Override
@@ -52,7 +55,7 @@ public final class SwingTask extends ClientTask {
 		}
 		Entity e = EntityLookup.find(level, target);
 		if (e == null) {
-			finish(seen ? "target_gone" : "not_found");
+			failed(seen ? "target_gone" : "not_found");
 			return;
 		}
 		seen = true;
@@ -61,41 +64,35 @@ public final class SwingTask extends ClientTask {
 			finish("killed");
 			return;
 		}
-		if (hitsWanted > 0 && hits >= hitsWanted) {
-			finish("hit");
-			return;
-		}
 		if (expired()) {
-			// A bounded module used up its step: settle as a normal completion so the caller composes
-			// the next step rather than treating running out of time as an error.
-			finish("budget");
+			finish(swung ? "cooldown" : "no_hit");
 			return;
 		}
 
 		aim(p, e);
-		if (p.distanceTo(e) > SWING_RANGE) {
+		if (p.distanceTo(e) > REACH) {
 			finish("out_of_reach");
 			return;
 		}
-		if (p.getAttackStrengthScale(0.5F) < 0.9F) {
-			// Cooldown still recovering: swinging now would land a weakened hit for nothing.
+		if (swung) {
+			if (p.getAttackStrengthScale(0.5F) >= FULL_CHARGE) finish("hit");
 			return;
 		}
+		if (p.getAttackStrengthScale(0.5F) < FULL_CHARGE) return;
 		if (mc.gameMode == null) {
 			failed("no_game_mode");
 			return;
 		}
 		mc.gameMode.attack(p, e);
 		p.swing(InteractionHand.MAIN_HAND);
-		hits++;
+		swung = true;
 	}
 
 	@Override
 	public JsonObject progress() {
 		JsonObject o = new JsonObject();
 		o.addProperty("target", target.toString());
-		o.addProperty("hits", hits);
-		o.addProperty("hitsWanted", hitsWanted);
+		o.addProperty("swung", swung);
 		Entity e = EntityLookup.find(Minecraft.getInstance().level, target);
 		LocalPlayer p = Minecraft.getInstance().player;
 		if (e != null) {
@@ -106,19 +103,20 @@ public final class SwingTask extends ClientTask {
 		} else {
 			o.addProperty("targetAlive", false);
 		}
+		if (p != null) o.addProperty("charge", round(p.getAttackStrengthScale(0.5F)));
 		return o;
 	}
 
 	@Override
 	public String describe() {
-		return "hit " + target + (hitsWanted > 0 ? " x" + hitsWanted : "");
+		return "attack " + target;
 	}
 
 	private void finish(String state) {
 		JsonObject extra = new JsonObject();
-		extra.addProperty("hits", hits);
-		// Report the damage the target actually took, not just how often we swung: a swing the server
-		// rejects as out of range is not a hit, and only the health bar knows the difference.
+		extra.addProperty("swung", swung);
+		// Report the damage the target actually took, not merely that a swing happened: a swing the
+		// server rejects as out of range is not a hit, and only the health bar knows the difference.
 		if (startHealth >= 0.0F) {
 			Entity e = EntityLookup.find(Minecraft.getInstance().level, target);
 			float now = e instanceof LivingEntity le ? le.getHealth() : 0.0F;

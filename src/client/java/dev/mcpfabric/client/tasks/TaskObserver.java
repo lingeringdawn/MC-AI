@@ -71,12 +71,6 @@ public final class TaskObserver {
 	 * a stale entry is marked, and a live one always outranks it.
 	 */
 	private static final int ANOMALY_STICKY_TICKS = 60;
-	/** Which anomaly the single recommended call should address first: most likely to kill you first. */
-	private static final String[] ANOMALY_PRIORITY = {
-			"dead", "below_world", "in_lava", "drowning", "falling_hard", "suffocating", "on_fire",
-			"low_health", "starving", "hungry", "stuck",
-	};
-
 	private final Deque<JsonObject> log = new ArrayDeque<>();
 	private final List<String> logKeys = new ArrayList<>();
 
@@ -125,13 +119,11 @@ public final class TaskObserver {
 	private double lastMoveZ = Double.NaN;
 	private int stillTicks;
 	private boolean moving;
-	/** Anomalies found this tick, keyed by id; each carries severity, evidence and a remedy. */
+	/** Anomalies found this tick, keyed by id; each carries severity, the evidence, and where it came from. */
 	private JsonObject anomalies = new JsonObject();
 	/** The worst one this tick, or null. */
 	private JsonObject worst;
 	private String worstId = "";
-	/** The recommended call for the current situation, already carrying its arguments. */
-	private JsonObject nextRecommended;
 	/** Ids seen last tick, used to log appearance and clearing rather than repeating every tick. */
 	private Set<String> knownAnomalies = new LinkedHashSet<>();
 	/** When each anomaly was first seen, and its last description, so a one-tick event stays visible. */
@@ -408,13 +400,7 @@ public final class TaskObserver {
 		anomalies = reported;
 		now.add("anomalies", reported);
 		now.addProperty("anomalyCount", reported.size());
-		if (worst != null) {
-			now.addProperty("worstAnomaly", worstId);
-			nextRecommended = nextAction(reported, report);
-			if (nextRecommended != null) now.add("nextAction", nextRecommended.deepCopy());
-		} else {
-			nextRecommended = null;
-		}
+		if (worst != null) now.addProperty("worstAnomaly", worstId);
 		now.addProperty("summary", summary(report, h, food));
 
 		prevHealth = h;
@@ -445,38 +431,6 @@ public final class TaskObserver {
 		}
 	}
 
-	/**
-	 * The single call that deals with the current situation, ready to run: tool name plus arguments,
-	 * with the offending entity's UUID already filled in. Turning "I can see I am drowning" into one
-	 * request is the difference between reacting in time and narrating your own death.
-	 */
-	private JsonObject nextAction(JsonObject reported, Set<String> ids) {
-		for (String id : ANOMALY_PRIORITY) {
-			if (!ids.contains(id)) continue;
-			JsonObject a = reported.getAsJsonObject(id);
-			if (a == null || !a.has("remedy")) continue;
-			String remedy = a.get("remedy").getAsString();
-			JsonObject call = new JsonObject();
-			call.addProperty("tool", remedy);
-			JsonObject args = new JsonObject();
-			if (a.has("at") && a.get("at").isJsonObject()) {
-				JsonObject at = a.getAsJsonObject("at");
-				if (at.has("uuid")) {
-					args.addProperty("uuid", at.get("uuid").getAsString());
-				} else if (at.has("x")) {
-					args.addProperty("x", at.get("x").getAsDouble());
-					args.addProperty("y", at.get("y").getAsDouble());
-					args.addProperty("z", at.get("z").getAsDouble());
-				}
-			}
-			if ("retreat_from".equals(remedy)) args.addProperty("distance", 8);
-			call.add("args", args);
-			call.addProperty("because", a.get("evidence").getAsString());
-			return call;
-		}
-		return null;
-	}
-
 	/** One line to read at a glance, instead of assembling the situation from a dozen fields. */
 	private String summary(Set<String> ids, float h, int food) {
 		StringBuilder sb = new StringBuilder();
@@ -492,11 +446,16 @@ public final class TaskObserver {
 		return sb.toString();
 	}
 
+	/**
+	 * Record one anomaly: what is wrong, how bad, the evidence for it, and where the thing that caused it
+	 * is. Deliberately without a remedy: naming a module to call is a judgement, and the facts here are
+	 * what a caller (or a rule it wrote) needs to make one itself. The remedy argument is kept in the
+	 * signature only until the call sites are swept — it is never reported.
+	 */
 	private void add(JsonObject into, String id, int severity, String remedy, String evidence, JsonObject at) {
 		JsonObject a = new JsonObject();
 		a.addProperty("severity", severity);
 		a.addProperty("evidence", evidence);
-		if (remedy != null) a.addProperty("remedy", remedy);
 		if (at != null) a.add("at", at);
 		into.add(id, a);
 		if (worst == null || severity > worst.get("severity").getAsInt()) {
@@ -537,14 +496,6 @@ public final class TaskObserver {
 	/** The worst anomaly from the latest sample, or null when nothing is wrong. */
 	public synchronized JsonObject topAnomaly() {
 		return worst;
-	}
-
-	/**
-	 * The single call that answers the current situation (tool + arguments), or null when there is
-	 * nothing worth doing. This is what {@code action.react} runs.
-	 */
-	public synchronized JsonObject nextAction() {
-		return nextRecommended;
 	}
 
 	public synchronized String topAnomalyId() {

@@ -100,10 +100,11 @@ const waitSeconds = (_maxTimeout: number) =>
 const COMPOSE_NOTE =
   " MODULES ARE COMPOSED BY YOU, NOT BY THE MOD: there is no 'chop a tree', 'kill that mob' or " +
   "'pick up the loot' behaviour to call. Each action does one step and returns, and you chain them — " +
-  "mine_block per log (move_to first if the trunk is a different level, re-read world.find_blocks after " +
-  "each one, since felling a trunk exposes the next), then move_to onto the drops so the player picks " +
-  "them up, then inventory/craft. Same for a fight: retrieve the mob, move_to into range while it is " +
-  "still where you last saw it, swing_at_entity, then re-observe and recompose. Keep each call short, " +
+  "dig per log (move_to first if the trunk is a different level, and re-scan with vision.scan after each " +
+  "one — felling a trunk exposes the next, and dig answers 'blocked' with blockedBy when a leaf is in the " +
+  "way), then move_to onto the drops so the player picks them up, then craft and click_slot. Same for a " +
+  "fight: retrieve the mob, move_to into range while it is still where you last saw it, attack, then " +
+  "re-observe and recompose. Keep each call short, " +
   "read the world between steps, and change your plan when it no longer matches. When you already know " +
   "the sequence, chain the steps in ONE run_plan call instead of one round-trip each; call them " +
   "separately when you need to look at the world between the steps. " +
@@ -718,7 +719,7 @@ export const TOOLS: ToolDef[] = [
     title: "Run a plan of steps (returns immediately)",
     description:
       "Client-only, NON-BLOCKING. Submit a list of steps YOU compose, in order, and return at once — the plan then runs on its own while you keep watching and stay free to overrule it. This is the main way to act smoothly: a whole 'walk over, mine three logs, pick up the drops' flow costs one call instead of four, and the steps run back-to-back on the game thread with nothing drifting in between. " +
-      'It is not a behaviour and knows nothing about trees or mobs: it runs exactly the steps you list, in the order you list them, and reports each one. A step is either {"action":"<module>", ...its params} for the multi-tick modules (moveTo, mineBlock, swing, eat, retreat, surface, mlg, craft — same parameters as calling them directly), or {"rpc":"<any method>", ...its params} fired inline (inventory.selectHotbar, interact.placeBlock, control.lookAt, inventory.swapSlots, action.eat...). ' +
+      'It is not a behaviour and knows nothing about trees or mobs: it runs exactly the steps you list, in the order you list them, and reports each one. A step is either {"action":"<module>", ...its params} for the multi-tick modules (moveTo, dig, attack, useFor, craft — same parameters as calling them directly), or {"rpc":"<any method>", ...its params} fired inline (inventory.selectHotbar, interact.placeBlock, control.lookAt, ui.clickSlot, control.setInput...). ' +
       'Because a module step is built when its turn comes, it may aim at a symbolic target: {"action":"moveTo","target":"nearest_drop"} resolves against the world AFTER the steps before it ran. ' +
       "Stop conditions are yours to declare, in guard: abortIfHealthBelow / abortIfAirBelow / abortIfDead end the run early and hand control straight back. A plan runs unattended for tens of seconds, so declare them rather than hoping. onFailure:'stop' (default) ends the run when a step fails, 'continue' presses on, and one step can be marked optional. " +
       "Comes back as soon as the plan is in charge, with a note and a first observe snapshot. Follow it with action_status: progress.completed / progress.total and progress.steps show which step is running and how the finished ones went, and progress.phase is that step's own live detail. To change course mid-flight, just submit another action or another plan — it supersedes this one on the next tick — or call action_cancel. A guard tripping, a failed step (with onFailure:'stop') or the plan's own budget ends the plan by itself and reports stoppedBy." +
@@ -732,7 +733,7 @@ export const TOOLS: ToolDef[] = [
                 .string()
                 .optional()
                 .describe(
-                  "A module to run: moveTo, mineBlock, swing, eat, retreat, surface, mlg, craft. Every sibling key is that module's parameter, exactly as if you called it directly.",
+                  "A module to run: moveTo, dig, attack, useFor, craft. Every sibling key is that module's parameter, exactly as if you called it directly. Anything not on that list was a composite or a reflex — compose it out of these, or write it as a rule.",
                 ),
               rpc: z
                 .string()
@@ -802,18 +803,46 @@ export const TOOLS: ToolDef[] = [
     annotations: WRITE,
   },
   {
-    name: "mine_block",
-    method: "action.mineBlock",
-    title: "Mine a block (returns immediately)",
+    name: "dig",
+    method: "action.dig",
+    title: "Break one block, from where you stand (returns immediately)",
     description:
-      "Client-only, NON-BLOCKING. One block, start to finish: walk into reach (A*), face it, auto-select the best tool in the hotbar, mine with realistic survival timing, and return when it is gone. Returns state mined / unreachable / timeout. " +
-      "It mines exactly the one block you named — it does not follow a vein or fell a tree for you. Give x/y/z, or 'target' (e.g. looking_at the log you can see)." +
+      "Client-only, NON-BLOCKING. Break exactly the one block named, from where the player already stands: " +
+      "it holds the best hotbar tool for that block, keeps the crosshair on it, and stops the moment the " +
+      "block is gone. It NEVER walks and NEVER clears anything out of the way — closing the distance is a " +
+      "move_to, and digging through the vine in front of a trunk is a dig of your own on whatever is in the " +
+      "way. Give x/y/z, or 'target' (looking_at, or visible_log for one you can actually see).\n" +
+      "Returns 'mined', or 'out_of_reach' (walk closer — it will not come to you), or 'blocked' with " +
+      "blockedBy/blockedAt naming the block the click would actually hit instead (dig that one, then come " +
+      "back), or 'interrupted', or 'timeout'. While it runs, progress.crosshairOnBlock says what is in the way." +
       COMPOSE_NOTE +
       OBSERVE_NOTE,
     inputSchema: {
       ...goalArgs(),
       timeoutSeconds: z.number().int().min(1).max(120).optional().default(30),
       waitSeconds: waitSeconds(120),
+    },
+    annotations: WRITE,
+  },
+  {
+    name: "attack",
+    method: "action.attack",
+    title: "Land one hit on an entity (returns immediately)",
+    description:
+      "Client-only, NON-BLOCKING. One swing, done properly: aim at the entity, wait for the attack bar to " +
+      "be full, swing, then wait for it to refill before returning. It never walks, never strafes, never " +
+      "picks a target and never decides the fight is over — closing the distance is a move_to, backing off " +
+      "is a move_to, and 'keep hitting until it dies' is calling this again. Waiting on both sides of the " +
+      "swing is what makes every hit it lands a full-damage one.\n" +
+      "Give 'uuid', or 'target' (nearest_hostile is the usual one when something is chewing on you). " +
+      "Returns 'hit' with damageDealt measured from the target's health bar, or 'killed', 'out_of_reach' " +
+      "(it moved — close the gap yourself), 'cooldown', 'target_gone', 'not_found'." +
+      OBSERVE_NOTE,
+    inputSchema: {
+      uuid: z.string().optional().describe("Entity UUID to hit. Give this or 'target'."),
+      target: z.string().optional().describe(`A shorthand instead of 'uuid': ${TARGET_SPEC}.`),
+      timeoutSeconds: z.number().int().min(1).max(60).optional().default(10),
+      waitSeconds: waitSeconds(60),
     },
     annotations: WRITE,
   },
@@ -879,8 +908,9 @@ export const TOOLS: ToolDef[] = [
       "Write a set of standing rules — your own reflexes, in your own words — and the mod evaluates them " +
       "every tick and fires the action the moment the condition holds. This is how a bot behaves like a " +
       "person doing something routine: not by deciding again on every read, but by having decided once. " +
-      'Examples: {"name":"get out of water","when":{"airBelow":100},"then":{"action":"surface"}} and ' +
-      '{"name":"disengage","when":{"healthBelow":10,"hostileWithin":4},"then":{"action":"retreat","target":"nearest_hostile","distance":8}}. ' +
+      'Examples: {"name":"get out of water","when":{"airBelow":100},"then":{"rpc":"control.setInput","jump":true}} ' +
+      '(holding jump swims up) and {"name":"break off","when":{"healthBelow":10,"hostileWithin":4},' +
+      '"then":{"rpc":"control.setInput","back":true}} (walking backwards, away from it). ' +
       `Conditions (any subset; all that are given must hold): ${RULES_CONDITIONS}. ` +
       '\'then\' is either {action:"<module>", ...its params} — a real module, same params as calling it — ' +
       'or {rpc:"<method>", ...}. Optional per rule: cooldownSeconds (default 3), delayTicks (default 3, ' +
@@ -898,7 +928,7 @@ export const TOOLS: ToolDef[] = [
               then: z
                 .object({})
                 .passthrough()
-                .describe('{action:"surface", ...} for a module, or {rpc:"control.lookAt", ...} for any method.'),
+                .describe('{action:"useFor","ticks":35} for a module, or {rpc:"control.setInput","jump":true} for any method.'),
               cooldownSeconds: z.number().min(0).max(600).optional().describe("Ticks between firings, in seconds. Default 3."),
               delayTicks: z.number().int().min(0).max(40).optional().describe("Notice-to-act pause. Default 3."),
               once: z.boolean().optional().describe("Fire at most once, then stop."),
@@ -945,26 +975,6 @@ export const TOOLS: ToolDef[] = [
     annotations: READ,
   },
   {
-    name: "react",
-    method: "action.react",
-    title: "Deal with whatever is wrong, now",
-    description:
-      "Client-only. The fast path for acting on the live state: the observation already works out the " +
-      "single best thing to do about the current situation, and this runs it. No arguments — it reads " +
-      'the remedy from observe.nextAction (tool + arguments, with the offending entity\'s UUID already ' +
-      "filled in) and executes it. Use it the moment observe.danger hits 2 rather than assembling an " +
-      "action yourself.\n" +
-      "The remedy goes out after a short human reaction time (150-350ms) rather than on the exact tick " +
-      "the state changed, because instant reactions are the clearest machine tell. Blocking: returns " +
-      '{queued, args, inTicks, because} once the reaction is scheduled. Errors if observe.nextAction is ' +
-      "empty, i.e. there is nothing worth doing right now.\n" +
-      "Remedies it can run: surface (drowning), water_bucket_save (a fall already long enough to hurt), " +
-      "eat (starving), retreat_from (low health with a mob on you), action_cancel (dead, or wedged). " +
-      "It never interrupts an action you asked for — if one is running, cancel it first.",
-    inputSchema: {},
-    annotations: WRITE,
-  },
-  {
     name: "observe",
     method: "action.observe",
     title: "Observe the world right now",
@@ -976,10 +986,11 @@ export const TOOLS: ToolDef[] = [
       "and dangerReason names the cause (low_health / drowning air=N / hostile_close / dead). " +
       "Also reports what is going WRONG in real time, which is the part a health bar hides: an 'anomalies' map " +
       "(dead / drowning / falling_hard / in_lava / suffocating / on_fire / freezing / below_world / starving / hungry " +
-      "/ low_health / taking_damage / stuck / carried_along), each with severity, the evidence, and the remedy to " +
-      "call. A cleared anomaly stays listed for a few seconds marked 'stale' so a fast one (a single hit) is not " +
-      "missed between polls. 'summary' is the whole situation in one line, and 'nextAction' is the single call that " +
-      "deals with it, arguments included — pass it to 'react' to act immediately.\n" +
+      "/ low_health / taking_damage / stuck / carried_along), each with severity, the evidence, and (where there is " +
+      "one) the entity that caused it under 'at'. There is no recommended remedy and no 'nextAction' — deciding " +
+      "what to do about it is yours, which is what rules_set is for. A cleared anomaly stays listed for a few " +
+      "seconds marked 'stale' so a fast one (a single hit) is not missed between polls. 'summary' is the whole " +
+      "situation in one line.\n" +
       "This is the ONLY source of awareness: the mod never acts on its own — it will not surface, fight, retreat or " +
       "save itself unless you call for it — so read this, then issue the short action you want. " +
       "Works whether idle or mid-action, and it is sampled EVERY tick — including while nothing is running — " +
@@ -1007,102 +1018,58 @@ export const TOOLS: ToolDef[] = [
   },
 
   {
-    name: "eat",
-    method: "action.eat",
-    title: "Eat food until full (returns immediately)",
+    name: "use_for",
+    method: "action.useFor",
+    title: "Hold the use button for N ticks (returns immediately)",
     description:
-      "Client-only, NON-BLOCKING. Hold the use key on the best food in the hotbar until the hunger bar is full (or no food is left). Uses the vanilla eating timing.",
-    inputSchema: {
-      timeoutSeconds: z.number().int().min(1).max(60).optional().default(20),
-      waitSeconds: waitSeconds(60),
-    },
-    annotations: WRITE,
-  },
-  {
-    name: "swing_at_entity",
-    method: "action.swing",
-    title: "Hit an entity (returns immediately)",
-    description:
-      "Client-only, NON-BLOCKING. One module, no policy: aim at the entity and swing until 'hits' hits land or the budget runs out. It never walks, never strafes and never picks a target — closing the distance is a move_to, stepping back is a move_to, and 'keep hitting until it dies' is calling this again. " +
-      "Only swings when the target is within reach and the attack cooldown is charged, so every hit is a full-damage one. " +
-      "Give 'uuid', or 'target' — nearest_hostile is the usual one when something is chewing on you and you would rather not look up its id. " +
-      "Returns state 'hit' (hits met) / 'killed' / 'out_of_reach' (it moved — close the gap yourself) / 'budget' / 'target_gone' / 'not_found', plus 'damageDealt' measured from the target's health bar." +
+      "Client-only, NON-BLOCKING. Button down, wait, button up — the one gesture behind eating, drinking, " +
+      "drawing a bow and holding up a shield. It does not look at what is in the hand and does not judge " +
+      "whether that food is worth eating (20 ticks is a second; a full meal is about 32). Select the item " +
+      "first if it matters, or leave the whole thing to a rule.\n" +
+      "Returns 'used' with holdingBefore/holdingAfter and 'consumed' — which is what separates a meal from " +
+      "standing there holding a torch — or 'timeout'." +
       OBSERVE_NOTE,
     inputSchema: {
-      uuid: z.string().optional().describe("Entity UUID to hit. Give this or 'target'."),
-      target: z.string().optional().describe(`A shorthand instead of 'uuid': ${TARGET_SPEC}.`),
-      hits: z.number().int().min(0).max(64).optional().default(1).describe("Stop after this many landed hits (0 = keep swinging for the whole budget)."),
+      ticks: z.number().int().min(1).max(1200).optional().default(35).describe("How long to hold. Eating takes about 32 ticks."),
       timeoutSeconds: z.number().int().min(1).max(60).optional().default(10),
       waitSeconds: waitSeconds(60),
     },
     annotations: WRITE,
   },
-  {
-    name: "retreat_from",
-    method: "action.retreat",
-    title: "Back away from something (returns immediately)",
-    description:
-      "Client-only, NON-BLOCKING. Withdraw roughly 'distance' blocks, on the far side of the player from the " +
-      "given entity or coordinate, then stop. Picks shelter that is walkable — it will not back into " +
-      "water or off a ledge — and re-aims around the arc when the way straight back is blocked. " +
-      "Returns state 'withdrew' / 'no_threat' (the thing is gone) / 'no_room' / 'no_path' / 'timeout'. " +
-      "Nothing retreats on its own: watch health and nearby hostiles in the observation feed and decide." +
-      OBSERVE_NOTE,
-    inputSchema: {
-      uuid: z.string().optional().describe("Entity to back away from. Give this or x/y/z."),
-      x: z.number().optional(),
-      y: z.number().optional(),
-      z: z.number().optional(),
-      distance: z.number().min(1.5).max(64).optional().default(6).describe("How far away to end up."),
-      timeoutSeconds: z.number().int().min(1).max(120).optional().default(20),
-      waitSeconds: waitSeconds(120),
-    },
-    annotations: WRITE,
-  },
-  {
-    name: "surface",
-    method: "action.surface",
-    title: "Swim up for air (returns immediately)",
-    description:
-      "Client-only, NON-BLOCKING. Swim straight up until the head is out of the water and the air bar has " +
-      "refilled, then return. No walking, no sprinting, so it rises instead of drifting sideways. " +
-      "Returns state 'surfaced' / 'not_in_water' / 'timeout'. " +
-      "There is deliberately no drowning reflex in the mod — observe publishes 'air' and " +
-      "'eyesUnderWater', and dangerReason says 'drowning air=N — action_surface' when it is time." +
-      OBSERVE_NOTE,
-    inputSchema: {
-      timeoutSeconds: z.number().int().min(1).max(120).optional().default(20),
-      waitSeconds: waitSeconds(120),
-    },
-    annotations: WRITE,
-  },
-  {
-    name: "water_bucket_save",
-    method: "action.mlg",
-    title: "Water-bucket fall save (returns immediately)",
-    description:
-      "Client-only, NON-BLOCKING. The 'MLG water' save, on demand: waits until the ground is inside placing " +
-      "range, empties a water bucket straight down, lands in it, then scoops the source back up and " +
-      "restores the hotbar slot. Needs a water_bucket in the hotbar. " +
-      "Returns state 'saved' / 'nothing_to_save' (already on the ground) / 'no_water_bucket' / " +
-      "'never_in_reach' (not actually falling). Nothing fires this automatically — call it from a fall " +
-      "you chose to take, before you are too close to the ground to place the water." +
-      OBSERVE_NOTE,
-    inputSchema: {
-      timeoutSeconds: z.number().int().min(1).max(60).optional().default(20),
-      waitSeconds: waitSeconds(60),
-    },
-    annotations: WRITE,
-  },
-
+  
   // ===== ui (client, menus) ==================================================================
   {
     name: "menu_status",
     method: "ui.state",
-    title: "Current screen / menu",
-    description: "Client-only. Report which GUI screen is open ('none' = normal gameplay) and which container menu is active.",
+    title: "Current screen / menu, and what is in every slot",
+    description:
+      "Client-only, READ-ONLY. Which GUI screen is open ('none' = normal gameplay), which container menu is " +
+      "active, what is on the cursor, and the contents of every slot by index — which is the address " +
+      "click_slot takes. Empty slots are listed too (index only), because the index is what matters.",
     inputSchema: {},
     annotations: READ,
+  },
+  {
+    name: "click_slot",
+    method: "ui.clickSlot",
+    title: "Click one slot in the open menu",
+    description:
+      "Client-only. One mouse click in the open container, through the same call vanilla's mouse handler " +
+      "makes. This is every container act there is: taking a crafted item (slot 0 of a crafting menu), " +
+      "pulling something out of a chest, feeding a furnace, moving a stack between the bag and the hotbar. " +
+      "Read menu_status first for the slot list. Returns what was in the slot before and after and what is " +
+      "on the cursor now, so you can see whether the server accepted it. Do not close a screen while " +
+      "carrying something on the cursor — the game deletes it.",
+    inputSchema: {
+      slot: z.number().int().min(0).describe("Slot index from menu_status."),
+      button: z.number().int().min(0).max(8).optional().default(0).describe("0 = left click, 1 = right click."),
+      mode: z
+        .enum(["pickup", "quick_move", "swap", "throw", "clone"])
+        .optional()
+        .default("pickup")
+        .describe("pickup = normal click; quick_move = shift-click, straight into the inventory."),
+    },
+    annotations: WRITE,
   },
   {
     name: "open_inventory",

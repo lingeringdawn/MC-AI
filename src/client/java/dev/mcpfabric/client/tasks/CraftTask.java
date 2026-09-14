@@ -14,48 +14,43 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 
 /**
- * Crafts the way a player does — through the real, visible GUI:
+ * Lay out a craft in the grid — and stop there.
  *
  * <ol>
- *   <li>open the screen (the inventory, exactly what pressing E does — for a 3x3 grid the caller has
- *       to have opened the crafting table already, same as a player standing at it);</li>
- *   <li>move one ingredient into its grid cell with a slot click, <b>one click per tick</b>, so the
- *       whole thing plays out on screen instead of happening invisibly in one frame;</li>
- *   <li>shift-click the result out, repeat for the requested number of crafts;</li>
- *   <li>hold the finished screen briefly so it is visible, then close it and return to the world.</li>
+ *   <li>open the screen a player would use (the inventory, exactly what pressing E does; a 3x3 grid needs
+ *       a crafting table the caller has already opened, same as a player standing at one);</li>
+ *   <li>move one ingredient into its cell with a slot click, <b>one click per tick</b>, so it plays out on
+ *       screen instead of happening invisibly in one frame;</li>
+ *   <li>confirm the game itself matched a recipe, then settle <em>leaving the grid laid out</em>.</li>
  * </ol>
  *
- * Nothing is spawned: the recipe match, ingredient consumption and output count all come from the
- * game's own menu logic.
+ * <p>It deliberately does not take the product. "What gets made" and "what gets picked up" are two
+ * decisions — laying out a grid whose result is only worth taking once is a real situation — so taking is
+ * a {@code ui.clickSlot} on the output slot (slot 0), made by the caller when it wants it.
+ *
+ * <p>Nothing is spawned: the recipe match, the ingredient consumption and the output count all come from
+ * the game's own menu logic.
  */
 public final class CraftTask extends ClientTask {
-	private enum Phase { OPENING, FILLING, TAKING, HOLDING, CLOSING }
-
-	/** Ticks the crafted result stays on screen before the screen is closed again. */
-	private static final int HOLD_TICKS = 12;
+	private enum Phase { OPENING, FILLING, DONE }
 
 	private final Item[] wanted;
-	private final int crafts;
 
 	private Phase phase = Phase.OPENING;
 	private int settleTicks;
-	private int holdTicks;
 	private int cell;
 	private int sub;
 	private int srcSlot = -1;
-	private int made;
-	private int perCraft;
-	private int total;
 	private String outputId;
+	private int outputCount;
 	private boolean openedByUs;
 	private int cols;
 	private int invFrom;
 	private int invTo;
 	private String problem;
 
-	public CraftTask(Item[] wanted, int crafts) {
+	public CraftTask(Item[] wanted) {
 		this.wanted = wanted;
-		this.crafts = crafts;
 	}
 
 	@Override
@@ -67,7 +62,6 @@ public final class CraftTask extends ClientTask {
 			return;
 		}
 		if (expired()) {
-			cleanup(mc, p);
 			finishFail("timeout");
 			return;
 		}
@@ -83,41 +77,26 @@ public final class CraftTask extends ClientTask {
 				if (++settleTicks < 2) return;          // give the menu a tick to compute the result
 				ItemStack preview = menu.slots.get(0).getItem();
 				if (preview.isEmpty()) {
-					cleanup(mc, p);
 					finishFail("That grid does not match a valid recipe.");
 					return;
 				}
-				if (outputId == null) {
-					outputId = BuiltInRegistries.ITEM.getKey(preview.getItem()).toString();
-					perCraft = preview.getCount();
-				}
-				phase = Phase.TAKING;
+				outputId = BuiltInRegistries.ITEM.getKey(preview.getItem()).toString();
+				outputCount = preview.getCount();
+				phase = Phase.DONE;
 			}
-			case TAKING -> {
-				quickMove(gm, menu, p, 0);
-				made++;
-				total += perCraft;
-				if (made >= crafts) {
-					phase = Phase.HOLDING; // leave the finished craft on screen for a moment
-				} else {
-					cell = 0;
-					sub = 0;
-					settleTicks = 0;
-					phase = Phase.FILLING;
-				}
-			}
-			case HOLDING -> {
-				if (++holdTicks < HOLD_TICKS) return;
-				cleanup(mc, p);
-				phase = Phase.CLOSING;
-			}
-			case CLOSING -> {
+			case DONE -> {
 				JsonObject o = new JsonObject();
-				o.addProperty("crafted", made);
-				o.addProperty("output", outputId == null ? "none" : outputId);
-				o.addProperty("outputPerCraft", perCraft);
-				o.addProperty("totalItems", total);
-				done("crafted", o);
+				o.addProperty("laidOut", true);
+				o.addProperty("output", outputId);
+				o.addProperty("outputPerCraft", outputCount);
+				o.addProperty("menu", menu.getClass().getSimpleName());
+				o.addProperty("resultSlot", 0);
+				o.addProperty("screenLeftOpen", mc.screen != null);
+				o.addProperty("note", "Grid laid out and the recipe matches. Take the product with "
+						+ "ui.clickSlot on slot 0 (quick_move to send it straight to the inventory), then "
+						+ "ui.close. Nothing is taken for you — and do not close the screen while carrying "
+						+ "an item on the cursor, the game deletes it.");
+				done("laid_out", o);
 			}
 		}
 	}
@@ -126,8 +105,6 @@ public final class CraftTask extends ClientTask {
 	public JsonObject progress() {
 		JsonObject o = new JsonObject();
 		o.addProperty("phase", phase.name().toLowerCase());
-		o.addProperty("crafted", made);
-		o.addProperty("targetCrafts", crafts);
 		o.addProperty("cell", cell);
 		o.addProperty("output", outputId == null ? "unknown" : outputId);
 		AbstractContainerMenu menu = Minecraft.getInstance().player != null
@@ -145,7 +122,7 @@ public final class CraftTask extends ClientTask {
 
 	@Override
 	public String describe() {
-		return "craft " + crafts + "x from a " + wanted.length + "-cell grid";
+		return "lay out a craft in a " + wanted.length + "-cell grid";
 	}
 
 	@Override
@@ -228,9 +205,9 @@ public final class CraftTask extends ClientTask {
 	}
 
 	/**
-	 * Click the carried stack down into a free player slot. The source slot is empty by now, so it is
-	 * the natural place; anything else free will do. Never close the screen while still carrying an
-	 * item, or the game deletes the stack.
+	 * Click the carried stack down into a free player slot. The source slot is empty by now, so it is the
+	 * natural place; anything else free will do. Never leave a screen holding an item on the cursor, or
+	 * closing it deletes the stack.
 	 */
 	private void putCarriedBack(MultiPlayerGameMode gm, AbstractContainerMenu menu, LocalPlayer p) {
 		if (menu.getCarried().isEmpty()) return;
@@ -248,7 +225,8 @@ public final class CraftTask extends ClientTask {
 
 	/**
 	 * Shift-click every non-empty grid cell back into the inventory, put down anything still on the
-	 * cursor (closing a screen while holding an item would destroy it), then close what we opened.
+	 * cursor, then close what we opened. Used on cancel and on failure — a layout that succeeded is left
+	 * on screen for the caller to take from.
 	 */
 	private void cleanup(Minecraft mc, LocalPlayer p) {
 		MultiPlayerGameMode gm = mc.gameMode;

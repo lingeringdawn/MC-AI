@@ -11,20 +11,16 @@ import dev.mcpfabric.bridge.RpcException;
 import dev.mcpfabric.bridge.RpcRouter;
 import dev.mcpfabric.client.ClientMc;
 import dev.mcpfabric.client.Targets;
-import dev.mcpfabric.client.tasks.AnomalyResponder;
+import dev.mcpfabric.client.tasks.AttackTask;
 import dev.mcpfabric.client.tasks.ClientTask;
 import dev.mcpfabric.client.tasks.CraftTask;
-import dev.mcpfabric.client.tasks.EatTask;
-import dev.mcpfabric.client.tasks.MineBlockTask;
-import dev.mcpfabric.client.tasks.MlgTask;
+import dev.mcpfabric.client.tasks.DigTask;
 import dev.mcpfabric.client.tasks.MoveToTask;
 import dev.mcpfabric.client.tasks.PlanTask;
-import dev.mcpfabric.client.tasks.RetreatTask;
 import dev.mcpfabric.client.tasks.Rules;
-import dev.mcpfabric.client.tasks.SurfaceTask;
-import dev.mcpfabric.client.tasks.SwingTask;
 import dev.mcpfabric.client.tasks.TaskManager;
 import dev.mcpfabric.client.tasks.TaskModules;
+import dev.mcpfabric.client.tasks.UseForTask;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.item.Item;
 
@@ -49,13 +45,13 @@ public final class ActionHandlers {
 	private ActionHandlers() {}
 
 	public static void register(RpcRouter router) {
+		// The atoms. Each does one physical act and reports how it went; none decides what to do next and
+		// none contains a reflex. A reflex is a rule the caller writes (rules.set) and a sequence is a
+		// plan the caller writes (action.do) — that division is the whole design.
 		TaskModules.register("moveTo", ActionHandlers::moveTo, 30);
-		TaskModules.register("mineBlock", ActionHandlers::mineBlock, 30);
-		TaskModules.register("swing", ActionHandlers::swing, 10);
-		TaskModules.register("eat", p -> new EatTask(), 20);
-		TaskModules.register("retreat", ActionHandlers::retreat, 20);
-		TaskModules.register("surface", p -> new SurfaceTask(), 20);
-		TaskModules.register("mlg", p -> new MlgTask(), 20);
+		TaskModules.register("dig", ActionHandlers::dig, 30);
+		TaskModules.register("attack", ActionHandlers::attack, 10);
+		TaskModules.register("useFor", ActionHandlers::useFor, 10);
 		TaskModules.register("craft", ActionHandlers::craft, 60);
 
 		for (TaskModules.Module module : TaskModules.all().values()) {
@@ -92,20 +88,6 @@ public final class ActionHandlers {
 		// own threads. Reading the world while an action runs should not cost a trip per read, and none
 		// of it needs to wait its turn behind the others.
 		router.register("rpc.batch", ctx -> batch(router, ctx));
-
-		// React to whatever the observation says is wrong, in one call. The remedy is the one the
-		// observer already computed (tool + arguments + the offending entity), and it goes out after a
-		// human reaction time rather than on the exact tick the state changed — which is the difference
-		// between looking like you noticed and looking like a script.
-		router.register("action.react", ctx -> ClientMc.call(() -> {
-			requireControl();
-			JsonObject out = AnomalyResponder.get().requestReaction(ClientMc.mc());
-			if (out == null) {
-				throw RpcException.unavailable("Nothing to react to: the observation recommends no remedy "
-						+ "right now. Call action.observe for the full picture, or action.status.");
-			}
-			return out;
-		}));
 
 		router.register("action.cancel", ctx -> ClientMc.call(() -> {
 			TaskManager.get().cancel(ClientMc.mc());
@@ -158,22 +140,24 @@ public final class ActionHandlers {
 	private static JsonObject help() {
 		JsonObject o = new JsonObject();
 		JsonObject mods = new JsonObject();
-		mods.add("moveTo", module("Walk to a position and stop there.", "x,y,z or target",
-				"reachRadius=1, sprint=false, timeoutSeconds=30",
+		mods.add("moveTo", module("Walk to a position and stop there. The only module with a goal, because "
+						+ "walking somewhere is one physical act.",
+				"x,y,z or target", "reachRadius=1, sprint=false, timeoutSeconds=30",
 				"done/reached, done/no_path, done/stuck, failed/timeout"));
-		mods.add("mineBlock", module("Mine exactly one block: walk into reach, aim at it, dig it.",
+		mods.add("dig", module("Break the one block named, from where the player already stands. Holds the "
+						+ "best hotbar tool for it and keeps the crosshair on it. Never walks, never clears a "
+						+ "block out of the way.",
 				"x,y,z or target", "timeoutSeconds=30",
-				"done/mined, failed/unreachable, failed/timeout"));
-		mods.add("swing", module("Hit an entity that is already within reach. It never walks.",
-				"uuid or target", "hits=1, timeoutSeconds=10",
-				"done/hit, done/killed, done/out_of_reach, done/budget, failed/target_gone, failed/not_found"));
-		mods.add("eat", module("Eat from the hotbar.", "—", "timeoutSeconds=20", "done/ate, failed/no_food"));
-		mods.add("retreat", module("Back away from an entity or a place.",
-				"uuid or target, or x,y,z", "distance=6, timeoutSeconds=20", "done/clear, failed/timeout"));
-		mods.add("surface", module("Come up to air.", "—", "timeoutSeconds=20", "done/surfaced, failed/*"));
-		mods.add("mlg", module("Break a fall with a water bucket.", "—", "timeoutSeconds=20", "done/*, failed/*"));
-		mods.add("craft", module("Craft in the player's 2x2 grid (4 cells) or an open table (9 cells), "
-						+ "clicking one slot per tick so it is all visible in game.",
+				"done/mined, failed/out_of_reach, failed/blocked (+blockedBy/blockedAt), failed/interrupted, failed/timeout"));
+		mods.add("attack", module("Land one hit: aim, wait for the attack bar to be full, swing, wait for it "
+						+ "to refill. Never walks or strafes.",
+				"uuid or target", "timeoutSeconds=10",
+				"done/hit (+damageDealt), done/killed, done/out_of_reach, done/cooldown, failed/target_gone, failed/not_found"));
+		mods.add("useFor", module("Hold the use button for N ticks — eating, drinking, drawing, guarding.",
+				"ticks=35", "timeoutSeconds=10", "done/used (+holdingBefore/After, consumed), failed/timeout"));
+		mods.add("craft", module("Lay out a craft in the player's 2x2 grid (4 cells) or an open table "
+						+ "(9 cells), one click per tick. Places the ingredients and stops: taking the product "
+						+ "is ui.clickSlot on the output slot.",
 				"grid[] of 4 or 9 item ids (null = empty cell), count=1", "timeoutSeconds=60",
 				"done/crafted, failed/no_recipe"));
 		o.add("modules", mods);
@@ -274,38 +258,38 @@ public final class ActionHandlers {
 	}
 
 	/**
-	 * Mine one block. Deliberately without judgement: it digs the block it is given, wherever that is.
-	 * Whether a block is worth digging — including whether it sits in water — is a decision, and
-	 * decisions belong to the caller. The facts for it come from {@code vision.scan} ({@code wet},
-	 * {@code inReach}, {@code hardness}), not from a rule buried in here.
+	 * Break one block, from where the player already stands. Deliberately without judgement: it digs the
+	 * block it is given. Whether that block is worth digging, whether it sits in water, and what to do
+	 * about whatever is in the way are all decisions — the facts for them come from {@code vision.scan}
+	 * ({@code wet}, {@code inReach}, {@code hardness}, {@code through}) and the answer comes from the
+	 * caller. When the shot is blocked it says which block is blocking it and stops.
 	 */
-	static ClientTask mineBlock(JsonObject p) throws RpcException {
-		return new MineBlockTask(goal(p, "mineBlock"));
+	static ClientTask dig(JsonObject p) throws RpcException {
+		return new DigTask(goal(p, "dig"));
 	}
 
-	/** Hit an entity. One module: closing the distance is a moveTo, keeping at it is another swing. */
-	static ClientTask swing(JsonObject p) throws RpcException {
-		return new SwingTask(uuidOf(p, "swing"), Math.max(0, optInt(p, "hits", 1)));
-	}
-
-	/** Withdraw from an entity or a place. Nothing does this on the bot's own initiative. */
-	static ClientTask retreat(JsonObject p) throws RpcException {
-		double distance = Math.max(1.5, Math.min(64.0, optDouble(p, "distance", 6.0)));
-		if (p.has("uuid") || p.has("target")) return new RetreatTask(uuidOf(p, "retreat"), distance);
-		if (p.has("x") && p.has("y") && p.has("z")) {
-			return new RetreatTask(num(p, "x"), num(p, "y"), num(p, "z"), distance);
-		}
-		throw RpcException.badRequest("Give 'uuid' or 'target' (back away from an entity), or 'x'/'y'/'z' "
-				+ "(back away from a coordinate).");
+	/** Land one hit on an entity: one swing at full charge, and no walking. */
+	static ClientTask attack(JsonObject p) throws RpcException {
+		return new AttackTask(uuidOf(p, "attack"));
 	}
 
 	/**
-	 * Real crafting as a blocking action: opens the container screen and clicks the grid one slot per
-	 * tick, so the whole sequence is visible in-game instead of happening invisibly. {@code grid} is
-	 * row-major — 4 entries for the player's 2x2 inventory grid, 9 for an open crafting table.
+	 * Hold the use button for a while — the one gesture behind eating, drinking, drawing a bow and
+	 * holding up a shield. It does not look at what is in the hand or whether the food is worth eating;
+	 * that is the caller's call, and usually a rule's.
+	 */
+	static ClientTask useFor(JsonObject p) throws RpcException {
+		return new UseForTask(optInt(p, "ticks", UseForTask.DEFAULT_TICKS));
+	}
+
+	/**
+	 * Lay out a craft in the player's 2x2 grid (4 cells) or an open table (9 cells), clicking one slot
+	 * per tick so the whole thing is visible in game. It places the ingredients and stops there: taking
+	 * the product is a click on the output slot, which is {@code ui.clickSlot}, so what gets made and
+	 * what gets picked up stay two separate decisions.
 	 */
 	static ClientTask craft(JsonObject p) throws RpcException {
-		return new CraftTask(parseGrid(p), Math.max(1, Math.min(64, optInt(p, "count", 1))));
+		return new CraftTask(parseGrid(p));
 	}
 
 	// --- parameter helpers ------------------------------------------------------------------------

@@ -16,7 +16,6 @@ import dev.mcpfabric.client.handlers.LocalPlayerHandlers;
 import dev.mcpfabric.client.handlers.NavHandlers;
 import dev.mcpfabric.client.handlers.UiHandlers;
 import dev.mcpfabric.client.handlers.VisionHandlers;
-import dev.mcpfabric.client.tasks.AnomalyResponder;
 import dev.mcpfabric.client.tasks.TaskManager;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
@@ -77,12 +76,11 @@ public class McpFabricClient implements ClientModInitializer {
 		});
 		ClientTickEvents.END_CLIENT_TICK.register(client -> BotController.get().onClientTick(client));
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
-			// The only thing driven from the tick is the task the AI asked for, plus the read-only
-			// sampling that feeds the observation. The responder is the single exception, and only
-			// when the config explicitly asks for it.
+			// The only things driven from the tick are the task the caller asked for, the rules the
+			// caller wrote, and the read-only sampling that feeds the observation. Nothing here has an
+			// instinct of its own: no reflex fires that a rule did not ask for.
 			TaskManager.get().setWatching(McpFabric.config().enableTaskObservation);
 			TaskManager.get().tick(client);
-			AnomalyResponder.get().tick(client, McpFabric.config().autoHandleAnomalies);
 			// While the bot has work, keep the game window in the foreground: the input channel it drives
 			// (held keys, clicks) is only live with an active window and a grabbed mouse.
 			AiControl.tick(client, TaskManager.get().busy() || BotController.get().cameraLocked());
