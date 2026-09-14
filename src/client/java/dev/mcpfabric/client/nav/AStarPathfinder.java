@@ -49,6 +49,28 @@ public final class AStarPathfinder {
 		return !level.getBlockState(pos).getFluidState().isEmpty();
 	}
 
+	/** Wading a shallow edge: slower than walking, but no risk. */
+	private static final double WADE_COST = 1.8;
+	/** Swimming: a channel crossing, slow enough that a dry detour is usually worth taking. */
+	private static final double SWIM_COST = 5.0;
+	/**
+	 * Head under water — an actual drowning risk rather than merely slow. Priced so heavily that a
+	 * long dry detour always wins, and a submerged cell is only ever entered when there is no other
+	 * way through (or the target itself is under water).
+	 */
+	private static final double SUBMERGED_COST = 12.0;
+
+	/**
+	 * Walking cost of entering a cell. Water is penalised by how much trouble it actually is: feet wet
+	 * while standing on the bottom is a mild slowdown, swimming is expensive, and a cell that would put
+	 * the bot's head under is priced like the hazard it is.
+	 */
+	private double moveCost(BlockPos feet) {
+		if (!liquid(feet)) return 1.0;
+		if (liquid(feet.below())) return liquid(feet.above()) ? SUBMERGED_COST : SWIM_COST;
+		return WADE_COST;
+	}
+
 	/** Blocks a real player would never walk into/onto. */
 	private static final Set<String> DANGEROUS = Set.of(
 			"minecraft:lava", "minecraft:fire", "minecraft:soul_fire", "minecraft:cactus",
@@ -132,11 +154,11 @@ public final class AStarPathfinder {
 				BlockPos h = current.pos.relative(dir);
 
 				if (canOccupy(h)) {
-					// Water is slow and can drain the air bar, so land routes should win ties: wading
-					// costs a bit more than walking, being fully submerged costs a lot.
-					consider(open, best, current, h, liquid(h) ? (liquid(h.below()) ? 3.0 : 1.6) : 1.0, goal);
+					consider(open, best, current, h, moveCost(h), goal);
 				} else if (canOccupy(h.above()) && passable(current.pos.above().above())) {
-					consider(open, best, current, h.above(), 1.5, goal); // step / swim up
+					// Step / swim up. Climbing out of water stays cheap on purpose: getting out of a
+					// pond is how the bot avoids drowning, so it must never look worse than staying in.
+					consider(open, best, current, h.above(), liquid(current.pos) ? 1.6 : 1.5, goal);
 				} else {
 					for (int d = 1; d <= 3; d++) {
 						if (canOccupy(h.below(d))) {
@@ -144,6 +166,14 @@ public final class AStarPathfinder {
 							break;
 						}
 					}
+				}
+
+				// Swimming up and out of water. From a liquid cell a two-block rise is an ordinary stroke
+				// onto the bank, but there is no single-block step to express it — so without this a shore
+				// sitting even one block above the waterline is unreachable, and the bot treads water next
+				// to an easy way out. The intermediate cell must be open, or the stroke is through stone.
+				if (liquid(current.pos) && passable(h.above()) && canOccupy(h.above(2))) {
+					consider(open, best, current, h.above(2), 2.2, goal);
 				}
 
 				// Sprint-jump across a gap. Without this the bot would refuse a route a person clears

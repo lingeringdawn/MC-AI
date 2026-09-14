@@ -186,8 +186,18 @@ public final class ThreatGuard {
 			charged = false;
 			note("backing off " + targetName);
 			BotController.get().setAttackHeld(false);
-			// We already turned to face the threat, so "back" retreats along the line away from it.
-			BotController.get().setMovement(false, true, false, false, jump, null, null);
+			// We are already facing the threat, so "back" retreats along the line away from it — but
+			// only while that way stays on solid ground. Backing into a pond just trades the mob for
+			// the drowning, so sidestep instead, and if every way out is water or a drop, hold ground.
+			if (standable(level, p, -1.0, 0.0)) {
+				BotController.get().setMovement(false, true, false, false, jump, null, null);
+			} else if (standable(level, p, 0.0, -1.0)) {
+				BotController.get().setMovement(false, false, true, false, jump, null, null);
+			} else if (standable(level, p, 0.0, 1.0)) {
+				BotController.get().setMovement(false, false, false, true, jump, null, null);
+			} else {
+				BotController.get().setMovement(false, false, false, false, jump, null, null);
+			}
 			return;
 		}
 
@@ -259,6 +269,29 @@ public final class ThreatGuard {
 		float yaw = (float) (Math.atan2(dz, dx) * (180.0 / Math.PI)) - 90.0F;
 		float pitch = (float) (-(Math.atan2(dy, Math.max(horiz, 0.01)) * (180.0 / Math.PI)));
 		BotController.get().lookAtTarget(yaw, pitch, BotController.LOOK_DEFEND);
+	}
+
+	/**
+	 * World-space offset of a camera-relative movement, so a "is that way clear?" test matches the keys
+	 * we actually press. Forward is wherever the bot is looking, which is the threat it just turned to.
+	 */
+	private static double[] offsetOf(LocalPlayer p, double fwd, double right) {
+		double yaw = Math.toRadians(p.getYRot());
+		double fx = -Math.sin(yaw);
+		double fz = Math.cos(yaw);
+		double rx = -Math.cos(yaw);
+		double rz = -Math.sin(yaw);
+		return new double[] { fx * fwd + rx * right, fz * fwd + rz * right };
+	}
+
+	/** True when stepping this way lands on ground, rather than in water or over a drop. */
+	private boolean standable(ClientLevel level, LocalPlayer p, double fwd, double right) {
+		double[] d = offsetOf(p, fwd, right);
+		BlockPos feet = BlockPos.containing(p.getX() + d[0], p.getY(), p.getZ() + d[1]);
+		if (!level.getBlockState(feet).getFluidState().isEmpty()) return false;
+		if (!level.getBlockState(feet.above()).getFluidState().isEmpty()) return false;
+		BlockPos floor = feet.below();
+		return !level.getBlockState(floor).getCollisionShape(level, floor).isEmpty();
 	}
 
 	/** Clear line of sight to the entity (so walls, not distance, decide what counts as a threat). */

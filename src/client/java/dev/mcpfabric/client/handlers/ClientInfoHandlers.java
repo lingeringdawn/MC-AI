@@ -65,6 +65,9 @@ public final class ClientInfoHandlers {
 		g.addProperty("interact", inWorld && control);
 		g.addProperty("navigation", inWorld && control);
 		g.addProperty("vision", inWorld && McpFabric.config().enableVision);
+		// Test-only: issuing commands as the player. Reported separately so it is obvious when the
+		// mod is running with the testing escape hatch open.
+		g.addProperty("cheats", inWorld && McpFabric.config().enableCheats);
 		return g;
 	}
 }

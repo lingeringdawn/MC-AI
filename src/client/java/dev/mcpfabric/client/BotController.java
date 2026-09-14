@@ -51,10 +51,13 @@ public final class BotController {
 	private boolean drivingKeys;
 
 	// water safety: swim up for air instead of drowning
-	/** Air left when the bot abandons what it is doing and heads for the surface. */
-	private static final int AIR_SURFACE_AT = 180;
+	/**
+	 * Air left when the bot abandons what it is doing and heads for the surface. Generous on purpose:
+	 * surfacing takes a moment, and a bot that starts late arrives with no margin.
+	 */
+	private static final int AIR_SURFACE_AT = 220;
 	/** Air that counts as "breathing again"; below this we keep the head above the water. */
-	private static final int AIR_CLEAR_AT = 285;
+	private static final int AIR_CLEAR_AT = 290;
 	private boolean surfacing;
 	private boolean surfaceJumpHeld;
 
@@ -73,7 +76,12 @@ public final class BotController {
 	 * instruction from the caller — so it sits between the task and the user.
 	 */
 	public static final int LOOK_DEFEND = 3;
-	public static final int LOOK_USER = 4;
+	/**
+	 * Drowning beats everything except being told what to do: once the head goes under, where the task
+	 * wanted to look stops mattering.
+	 */
+	public static final int LOOK_SAFETY = 4;
+	public static final int LOOK_USER = 5;
 	/** How long the current look owner keeps the view after its last refresh. */
 	private static final long LOOK_HOLD_TICKS = 3;
 
@@ -632,7 +640,14 @@ public final class BotController {
 			// is below, do NOT jump — that is how the bot dives to it.
 			boolean needHeight = node.getY() > p.getY() + 0.5;
 			boolean descending = node.getY() < p.getY() - 0.4;
-			if (needHeight || (p.isUnderWater() && !descending)) {
+			// A bank at roughly our own level: swim up to it and hop out. The step-up hop above is
+			// skipped while in water, so without this the bot treads water against the shore forever
+			// instead of climbing out — and never getting out is what kills it.
+			BlockPos feetAhead = BlockPos.containing(p.getX() + ux, p.getY(), p.getZ() + uz);
+			BlockPos headAhead = feetAhead.above();
+			boolean bankAhead = horiz >= 0.05 && !descending
+					&& solid(level, feetAhead) && passable(level, headAhead) && !liquid(level, headAhead);
+			if (needHeight || (p.isUnderWater() && !descending) || bankAhead) {
 				jumpOnceTicks = Math.max(jumpOnceTicks, Humanizer.ticks(jumpRng, 3, 6));
 			}
 		} else if (climbing) {
@@ -669,6 +684,10 @@ public final class BotController {
 
 	private static boolean solid(ClientLevel level, BlockPos pos) {
 		return !passable(level, pos);
+	}
+
+	private static boolean liquid(ClientLevel level, BlockPos pos) {
+		return !level.getBlockState(pos).getFluidState().isEmpty();
 	}
 
 	/**
@@ -749,23 +768,48 @@ public final class BotController {
 	 * under the surface until they died.
 	 */
 	private void applyWaterSafety(LocalPlayer p) {
-		boolean under = p.isUnderWater();
-		if (under) {
-			if (p.getAirSupply() <= AIR_SURFACE_AT) surfacing = true;
-		} else if (!p.isInWater() || p.getAirSupply() >= AIR_CLEAR_AT) {
-			// Head is out of the water (or we are back on land): safe again.
+		boolean eyeUnder = p.isUnderWater();
+		if (!p.isInWater()) {
+			surfacing = false;
+		} else if (eyeUnder) {
+			// While a path is being followed the bot may be diving to a submerged node on purpose, so
+			// hold off until the air genuinely runs low. With no path it is only in the water by
+			// accident — idle, pushed in, or knocked back into it — and there is no reason to let it
+			// sink at all, so keep the head up from the first bubble lost.
+			int limit = path != null ? AIR_SURFACE_AT : 300;
+			if (p.getAirSupply() <= limit) surfacing = true;
+		} else if (p.getAirSupply() >= AIR_CLEAR_AT) {
+			// Head is clear and the lungs are full again: safe.
 			surfacing = false;
 		}
 		if (surfacing) {
 			// Override whatever the task wanted: rise straight up until we can breathe.
 			fwd = back = left = right = false;
 			sprint = false;
-			jumpHeld = true;
-			surfaceJumpHeld = true;
+			// Stroke only while the eyes are actually under water. Holding the key the whole time
+			// launches the bot clear of the surface and it drops straight back with a splash — the head
+			// then ping-pongs between the air and the pond floor, which reads as drowning and wastes the
+			// stroke. Pulsing it keeps the head riding the waterline, which is what treading water looks
+			// like, and the eyes break the surface every few ticks so the air bar refills.
+			jumpHeld = surfaceStroke(p);
+			surfaceJumpHeld = jumpHeld;
+			// Tilt the view toward the surface while stroking up. The swim itself is driven by the jump
+			// key, but a bot that keeps its face pointed at the pond floor while rising looks like it is
+			// drowning on purpose.
+			lookAtTarget(p.getYRot(), -45.0F, LOOK_SAFETY);
 		} else if (surfaceJumpHeld) {
 			jumpHeld = false;
 			surfaceJumpHeld = false;
 		}
+	}
+
+	/**
+	 * Whether to push upward this tick while surfacing: yes while the eyes are under water, no once they
+	 * break the surface. Vanilla swims on the jump key, so a steady hold launches the bot clean out of
+	 * the pond and drops it back; pulsing keeps the head at the waterline instead.
+	 */
+	private static boolean surfaceStroke(LocalPlayer p) {
+		return p.isUnderWater();
 	}
 
 	private void stopNavigationInternal(String reason) {

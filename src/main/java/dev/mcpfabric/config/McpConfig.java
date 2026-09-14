@@ -15,9 +15,10 @@ import java.util.UUID;
  * An auth token is generated on first run and remains in the config file so it does not leak into
  * logs. Copy it into the MCP server's {@code MCPFABRIC_TOKEN} environment variable.
  *
- * <p>Every switch here controls a <em>client</em> behaviour. There are no "enable cheating" flags,
- * because the mod no longer has any privileged capability to gate: it can only do what the player
- * sitting at the keyboard could do.
+ * <p>Every switch here controls a <em>client</em> behaviour. The one exception worth calling out is
+ * {@link #enableCheats}, which only permits the mod to <em>type commands</em> on the player's behalf —
+ * it grants no privileged capability of its own, since the world still decides whether the player may
+ * run them.
  */
 public final class McpConfig {
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
@@ -56,6 +57,13 @@ public final class McpConfig {
 	 * only when a water bucket is in the hotbar.
 	 */
 	public boolean enableFallSaving = true;
+	/**
+	 * FOR TESTING ONLY. Allow the {@code cheat.*} group to issue vanilla commands as the local player
+	 * — give yourself a pickaxe, summon the mob you want to train against, force night, build a test
+	 * rig. Nothing is bypassed: the commands go through the normal path, so they still fail in a world
+	 * where the player is not an operator and cheats are off. Turn it off for anything but testing.
+	 */
+	public boolean enableCheats = false;
 
 	/**
 	 * Sample the world every tick while a blocking action runs, so callers can see health, nearby

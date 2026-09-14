@@ -3,6 +3,7 @@ package dev.mcpfabric.client;
 import dev.mcpfabric.McpFabric;
 import dev.mcpfabric.bridge.RpcRouter;
 import dev.mcpfabric.client.handlers.ActionHandlers;
+import dev.mcpfabric.client.handlers.CheatHandlers;
 import dev.mcpfabric.client.handlers.ClientChatHandlers;
 import dev.mcpfabric.client.handlers.ClientEntityHandlers;
 import dev.mcpfabric.client.handlers.ClientEventsHandlers;
@@ -57,6 +58,8 @@ public class McpFabricClient implements ClientModInitializer {
 		UiHandlers.register(router);
 		VisionHandlers.register(router);
 		ClientChatHandlers.register(router);
+		// Test-only escape hatch, gated behind enableCheats (see McpConfig).
+		CheatHandlers.register(router);
 
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
 			if (!pausePatched) {

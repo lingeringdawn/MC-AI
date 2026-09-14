@@ -80,6 +80,12 @@ const OBSERVE_NOTE =
 
 // ----- catalogue ------------------------------------------------------------------------------
 
+// Shared bits for the cheat group (TEST ONLY — see McpConfig.enableCheats).
+const CHEAT = { destructiveHint: true } as const;
+const CHEAT_ITEM = z.string().describe('Item or block id, e.g. "diamond_pickaxe" or "minecraft:stone".');
+const CHEAT_NOTE =
+  " TEST-ONLY cheat: requires enableCheats in the mod config and operator rights in the world.";
+
 export const TOOLS: ToolDef[] = [
   // ===== info ================================================================================
   {
@@ -204,7 +210,209 @@ export const TOOLS: ToolDef[] = [
     annotations: READ,
   },
 
-  // ===== player (client local player) ========================================================
+  // ===== cheats (TEST ONLY) ===================================================================
+// Every one of these just types a vanilla command as the local player, so nothing here bypasses a
+// permission, a gamerule or a server-side check: in a world where the player is not an operator they
+// fail exactly like typing the command would. The whole group is refused unless "enableCheats" is set
+// in config/mcpfabric.config.json. Meant for standing up a scenario quickly instead of grinding.
+...[
+  {
+    name: "cheat_command",
+    method: "cheat.command",
+    title: "Run a command (cheat)",
+    description:
+      "TEST-ONLY. Run any vanilla command as the local player (leading '/' optional). The generic " +
+      "escape hatch behind the other cheat_* helpers — use it for anything not wrapped, e.g. " +
+      '"gamerule doDaylightCycle false" or "loot give @s loot minecraft:chests/simple_dungeon".' +
+      CHEAT_NOTE,
+    inputSchema: { command: z.string().describe("The command, with or without a leading '/'.") },
+    annotations: CHEAT,
+  },
+  {
+    name: "cheat_give",
+    method: "cheat.give",
+    title: "Give items (cheat)",
+    description: "TEST-ONLY. Put items straight into the player's inventory." + CHEAT_NOTE,
+    inputSchema: {
+      item: CHEAT_ITEM,
+      count: z.number().int().min(1).max(6400).optional().default(1),
+    },
+    annotations: CHEAT,
+  },
+  {
+    name: "cheat_summon",
+    method: "cheat.summon",
+    title: "Summon an entity (cheat)",
+    description:
+      "TEST-ONLY. Spawn an entity — the quickest way to have the mob you want to train against. " +
+      "Coordinates are optional (defaults to the player's position)." + CHEAT_NOTE,
+    inputSchema: {
+      type: z.string().describe('Entity type, e.g. "minecraft:zombie".'),
+      x: z.number().optional(),
+      y: z.number().optional(),
+      z: z.number().optional(),
+      nbt: z.string().optional().describe("Optional NBT tag, e.g. '{NoAI:1b}'."),
+    },
+    annotations: CHEAT,
+  },
+  {
+    name: "cheat_set_time",
+    method: "cheat.set_time",
+    title: "Set the time (cheat)",
+    description: "TEST-ONLY. Jump to a time of day — handy for testing night behaviour." + CHEAT_NOTE,
+    inputSchema: {
+      time: z.string().describe('"day", "noon", "night", "midnight", or a tick value like "18000".'),
+    },
+    annotations: CHEAT,
+  },
+  {
+    name: "cheat_set_weather",
+    method: "cheat.set_weather",
+    title: "Set the weather (cheat)",
+    description: "TEST-ONLY. Force clear/rain/thunder, optionally for a limited time." + CHEAT_NOTE,
+    inputSchema: {
+      weather: z.enum(["clear", "rain", "thunder"]),
+      durationSeconds: z.number().int().min(1).max(1000000).optional(),
+    },
+    annotations: CHEAT,
+  },
+  {
+    name: "cheat_set_game_mode",
+    method: "cheat.set_game_mode",
+    title: "Set the game mode (cheat)",
+    description:
+      "TEST-ONLY. Switch game mode — creative is the fastest way to move the player somewhere or to " +
+      "inspect a build without falling." + CHEAT_NOTE,
+    inputSchema: { mode: z.enum(["survival", "creative", "adventure", "spectator"]) },
+    annotations: CHEAT,
+  },
+  {
+    name: "cheat_teleport",
+    method: "cheat.teleport",
+    title: "Teleport the player (cheat)",
+    description:
+      "TEST-ONLY. Move the player to a coordinate instantly, without walking there first." + CHEAT_NOTE,
+    inputSchema: {
+      ...vec3(),
+      yaw: z.number().optional(),
+      pitch: z.number().optional(),
+    },
+    annotations: CHEAT,
+  },
+  {
+    name: "cheat_effect",
+    method: "cheat.effect",
+    title: "Apply a status effect (cheat)",
+    description:
+      "TEST-ONLY. Give the player a potion effect, e.g. water_breathing to work on underwater " +
+      "behaviour or night_vision to see." + CHEAT_NOTE,
+    inputSchema: {
+      effect: z.string().describe('Effect id, e.g. "minecraft:water_breathing".'),
+      seconds: z.number().int().min(1).max(1000000).optional().default(30),
+      amplifier: z.number().int().min(0).max(255).optional().default(0),
+      hideParticles: z.boolean().optional().default(false),
+    },
+    annotations: CHEAT,
+  },
+  {
+    name: "cheat_enchant",
+    method: "cheat.enchant",
+    title: "Enchant the held item (cheat)",
+    description: "TEST-ONLY. Enchant whatever the player is holding." + CHEAT_NOTE,
+    inputSchema: {
+      enchantment: z.string().describe('Enchantment id, e.g. "minecraft:efficiency".'),
+      level: z.number().int().min(1).max(255).optional().default(1),
+    },
+    annotations: CHEAT,
+  },
+  {
+    name: "cheat_xp",
+    method: "cheat.xp",
+    title: "Give experience (cheat)",
+    description: "TEST-ONLY. Add experience points (or levels)." + CHEAT_NOTE,
+    inputSchema: {
+      amount: z.number().int().min(0).max(1000000),
+      levels: z.boolean().optional().default(false),
+    },
+    annotations: CHEAT,
+  },
+  {
+    name: "cheat_damage",
+    method: "cheat.damage",
+    title: "Damage the player (cheat)",
+    description:
+      "TEST-ONLY. Hurt the player by a fixed amount — the direct way to test low-health, retreat " +
+      "and death handling without hunting for a mob." + CHEAT_NOTE,
+    inputSchema: {
+      amount: z.number().min(0).max(1000),
+      type: z.string().optional().describe('Damage type, e.g. "minecraft:drowning".'),
+    },
+    annotations: CHEAT,
+  },
+  {
+    name: "cheat_kill",
+    method: "cheat.kill",
+    title: "Kill nearby entities (cheat)",
+    description:
+      "TEST-ONLY. Clear entities around the player — useful for ending a fight or tidying up test " +
+      "dummies. Never affects players." + CHEAT_NOTE,
+    inputSchema: {
+      radius: z.number().min(1).max(128).optional().default(8),
+      type: z.string().optional().describe("Restrict to one entity type."),
+    },
+    annotations: CHEAT,
+  },
+  {
+    name: "cheat_clear",
+    method: "cheat.clear",
+    title: "Clear inventory (cheat)",
+    description: "TEST-ONLY. Empty the inventory, or just one item." + CHEAT_NOTE,
+    inputSchema: { item: CHEAT_ITEM.optional() },
+    annotations: CHEAT,
+  },
+  {
+    name: "cheat_set_block",
+    method: "cheat.set_block",
+    title: "Set a block (cheat)",
+    description: "TEST-ONLY. Place a single block — build a step, a wall or a target to mine." + CHEAT_NOTE,
+    inputSchema: {
+      ...vec3(),
+      block: CHEAT_ITEM,
+      mode: z.enum(["replace", "destroy", "keep"]).optional(),
+    },
+    annotations: CHEAT,
+  },
+  {
+    name: "cheat_fill",
+    method: "cheat.fill",
+    title: "Fill a region (cheat)",
+    description:
+      "TEST-ONLY. Fill a box of blocks — the fast way to build a test rig (a pool, a pillar, a wall)." +
+      CHEAT_NOTE,
+    inputSchema: {
+      from: z.object({ x: z.number(), y: z.number(), z: z.number() }),
+      to: z.object({ x: z.number(), y: z.number(), z: z.number() }),
+      block: CHEAT_ITEM,
+      mode: z.enum(["replace", "destroy", "hollow", "keep", "outline"]).optional(),
+    },
+    annotations: CHEAT,
+  },
+  {
+    name: "cheat_open_to_lan",
+    method: "cheat.open_to_lan",
+    title: "Enable cheats in a single-player world (cheat)",
+    description:
+      "TEST-ONLY. Open the current single-player world to LAN with cheats on, which is what grants " +
+      "the host operator rights — the one thing the rest of the cheat_* group needs and cannot grant " +
+      "itself. Refuses on a real server. Note it genuinely opens a LAN port for the world, so close " +
+      "it again when you are done testing." + CHEAT_NOTE,
+    inputSchema: {
+      port: z.number().int().min(0).max(65535).optional().default(0).describe("0 lets the game pick."),
+    },
+    annotations: CHEAT,
+  },
+],
+
   {
     name: "get_self",
     method: "player.getState",
