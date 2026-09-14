@@ -2,7 +2,9 @@ package dev.mcpfabric.client.tasks;
 
 import com.google.gson.JsonObject;
 import dev.mcpfabric.client.BotController;
+import dev.mcpfabric.client.Vision;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.phys.Vec3;
@@ -61,6 +63,8 @@ public final class MineBlockTask extends ClientTask {
 		// this, so report the whole chain of conditions the dig depends on: is the block in reach, is the
 		// crosshair on it (that is what a click targets), is the button held, and is progress accruing.
 		if (p != null) {
+			ClientLevel level = mc.level;
+			o.addProperty("targetWet", level != null && Vision.submerged(level, miner.pos()));
 			o.addProperty("inReach", p.getEyePosition().distanceTo(Vec3.atCenterOf(miner.pos())) <= 4.5);
 			o.addProperty("crosshairOnTarget", BlockMiner.crosshairOn(mc, miner.pos()));
 			o.addProperty("lookErrorDeg", round(BotController.get().lookErrorDeg()));

@@ -169,11 +169,22 @@ public final class TaskManager {
 
 	/** Just the live watch payload (world + progress + log), without the task result. */
 	public JsonObject observe() {
+		return observe(0L);
+	}
+
+	/**
+	 * The same payload, plus every change since {@code sinceSeq}.
+	 *
+	 * <p>The watch never stops — it is sampled each tick whether a task is running or not — so a caller
+	 * can read now, do something else, and read again with the {@code seq} it was given: what happened in
+	 * between comes back as a list instead of having to be caught at the moment it was true.
+	 */
+	public JsonObject observe(long sinceSeq) {
 		JsonObject o = new JsonObject();
 		ClientTask t = current;
 		o.addProperty("task", t == null ? "none" : t.getClass().getSimpleName());
 		o.addProperty("active", t != null && !t.isDone());
-		attachObservation(o, t);
+		attachObservation(o, t, sinceSeq);
 		return o;
 	}
 
@@ -182,13 +193,17 @@ public final class TaskManager {
 	}
 
 	private void attachObservation(JsonObject o, ClientTask t) {
+		attachObservation(o, t, 0L);
+	}
+
+	private void attachObservation(JsonObject o, ClientTask t, long sinceSeq) {
 		if (t != null) {
 			o.addProperty("elapsedMs", t.elapsedMs());
 			o.addProperty("remainingMs", t.remainingMsLeft());
 			JsonObject p = t.progress();
 			if (p != null && p.size() > 0) o.add("progress", p);
 		}
-		addObservation(o);
+		o.add("observe", observer.json(sinceSeq));
 	}
 
 	private static JsonObject idle(String detail) {

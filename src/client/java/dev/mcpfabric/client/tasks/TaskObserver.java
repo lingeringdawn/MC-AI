@@ -1,8 +1,10 @@
 package dev.mcpfabric.client.tasks;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import dev.mcpfabric.client.BotController;
+import dev.mcpfabric.client.Vision;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
@@ -88,6 +90,23 @@ public final class TaskObserver {
 
 	// latest sample
 	private JsonObject snapshot = new JsonObject();
+	/** Position in the stream: every sample counts, so a caller can ask for "what since I last read". */
+	private long seq;
+	/** Sequence number shared by log lines and change events, so one cursor reads both. */
+	private long eventSeq;
+	/**
+	 * Changes worth reporting on their own — air ticking away, food dropping, a heal, a step that moved
+	 * the player somewhere new. Kept in a ring buffer rather than only as a level, so a caller reading a
+	 * couple of times a second can never miss one however briefly it was true.
+	 */
+	private final Deque<JsonObject> events = new ArrayDeque<>();
+	private static final int EVENT_CAPACITY = 80;
+	/** Previous values, so a change is reported as a change rather than only as a state. */
+	private float prevAir = 300.0F;
+	private int prevFoodSeen = -1;
+	private float prevHealthSeen = -1.0F;
+	/** Which 8-block cell the player was in, so walking somewhere new is an event, not every step. */
+	private int prevPosKey = Integer.MIN_VALUE;
 	private int threatCount;
 	private double closestThreat = Double.MAX_VALUE;
 	private String closestThreatName = "";
@@ -178,6 +197,7 @@ public final class TaskObserver {
 		o.addProperty("onGround", p.onGround());
 		o.addProperty("inWater", p.isInWater());
 		o.addProperty("dead", p.isDeadOrDying() || p.getHealth() <= 0.0F);
+		o.addProperty("seq", ++seq);
 
 		// --- position / motion ----------------------------------------------
 		JsonObject pos = new JsonObject();
@@ -197,6 +217,11 @@ public final class TaskObserver {
 		// --- what the crosshair is on ---------------------------------------
 		o.add("lookingAt", lookingAt(mc, level));
 
+		// --- what the eye can see, every tick --------------------------------
+		// Carried in the live sample on purpose: reading the world should not mean stopping to look, and
+		// a caller deciding what to do next needs the same view the player has, not a chunk scan.
+		o.add("visible", visibleSummary(mc));
+
 		// --- threats ---------------------------------------------------------
 		sampleThreats(p, level, o);
 
@@ -205,6 +230,9 @@ public final class TaskObserver {
 
 		// --- abnormal player states, live, each with the module that fixes it -------------------
 		sampleAnomalies(p, level, o);
+
+		// --- and the changes themselves, so the stream never has a gap -------------------------
+		sampleChanges(p, o);
 
 		// --- the task's own progress ----------------------------------------
 		if (taskProgress != null && taskProgress.size() > 0) o.add("progress", taskProgress);
@@ -529,11 +557,38 @@ public final class TaskObserver {
 		o.add("now", snapshot.deepCopy());
 		o.addProperty("danger", danger());
 		o.addProperty("dangerReason", dangerReason());
+		o.addProperty("seq", seq);
+		o.addProperty("eventSeq", eventSeq);
 		JsonArray logs = new JsonArray();
 		synchronized (log) {
 			for (JsonObject e : log) logs.add(e.deepCopy());
 		}
 		o.add("log", logs);
+		return o;
+	}
+
+	/**
+	 * The same payload plus everything that changed after {@code sinceSeq}.
+	 *
+	 * <p>This is what makes the watch a stream rather than a poll: keep the {@code seq} you read last
+	 * time, pass it back on the next read, and every change in between arrives with its sequence number
+	 * — no gaps to fall into, and no need to read often enough to be sure of catching something.
+	 */
+	public JsonObject json(long sinceSeq) {
+		JsonObject o = json();
+		if (sinceSeq <= 0L) return o;
+		JsonArray fresh = new JsonArray();
+		synchronized (log) {
+			for (JsonObject e : events) {
+				JsonElement s = e.get("seq");
+				if (s != null && s.getAsLong() > sinceSeq) fresh.add(e.deepCopy());
+			}
+		}
+		o.add("newEvents", fresh);
+		o.addProperty("sinceSeq", sinceSeq);
+		o.addProperty("note", fresh.isEmpty()
+				? "Nothing changed since seq " + sinceSeq + "; 'now' is still current."
+				: fresh.size() + " change(s) since seq " + sinceSeq + " — 'now' is the state they left.");
 		return o;
 	}
 
@@ -597,6 +652,73 @@ public final class TaskObserver {
 		}
 	}
 
+	/**
+	 * The stream of changes, taken every tick whether a task is running or not.
+	 *
+	 * <p>A snapshot answers "what is true now"; this answers "what happened while you were not looking".
+	 * That difference is the whole point, because most of what needs reacting to is short-lived — a bite
+	 * taken, air running down, food slipping — and a caller polling a couple of times a second would
+	 * otherwise have to be lucky to see it. Each change carries its own sequence number, so reading with
+	 * {@code sinceSeq} returns exactly what was missed and nothing else.
+	 */
+	private void sampleChanges(LocalPlayer p, JsonObject now) {
+		if (air != prevAir) {
+			event("air", air < prevAir ? "air " + (int) prevAir + " -> " + air : "air back to " + air);
+			prevAir = air;
+		}
+		int food = p.getFoodData().getFoodLevel();
+		if (prevFoodSeen >= 0 && food != prevFoodSeen) {
+			event("food", "food " + prevFoodSeen + " -> " + food);
+		}
+		prevFoodSeen = food;
+		// Damage already raises its own anomaly with the attacker named; a *gain* is the half nothing
+		// else reports, so that is the one logged here.
+		if (prevHealthSeen >= 0.0F && health > prevHealthSeen + 0.01F) {
+			event("health_up", "health " + round(prevHealthSeen) + " -> " + round(health));
+		}
+		prevHealthSeen = health;
+
+		BlockPos at = p.blockPosition();
+		int cell = (at.getX() >> 3) * 71 + (at.getZ() >> 3);
+		if (cell != prevPosKey) {
+			if (prevPosKey != Integer.MIN_VALUE) {
+				event("moved", "now around " + at.getX() + "," + at.getY() + "," + at.getZ());
+			}
+			prevPosKey = cell;
+		}
+		now.addProperty("eventSeq", eventSeq);
+	}
+
+	/** Record a change with its own sequence number. */
+	private void event(String kind, String text) {
+		JsonObject e = note0(text);
+		e.addProperty("kind", kind);
+		synchronized (log) {
+			events.addLast(e);
+			while (events.size() > EVENT_CAPACITY) events.removeFirst();
+		}
+	}
+
+	/** A cheap sweep of what is in front of the player, small enough to take every tick. */
+	private JsonObject visibleSummary(Minecraft mc) {
+		JsonObject o = new JsonObject();
+		JsonArray arr = new JsonArray();
+		for (Vision.Seen s : Vision.blocks(mc, 16.0, 7, 4, null, 6)) {
+			JsonObject b = new JsonObject();
+			b.addProperty("id", s.id());
+			b.addProperty("x", s.pos().getX());
+			b.addProperty("y", s.pos().getY());
+			b.addProperty("z", s.pos().getZ());
+			b.addProperty("distance", round(s.distance()));
+			b.addProperty("wet", s.wet());
+			b.addProperty("inReach", s.inReach());
+			arr.add(b);
+		}
+		o.add("blocks", arr);
+		o.addProperty("count", arr.size());
+		return o;
+	}
+
 	/** Append a log entry (deduplicated consecutive repeats). Thread-safe: reads happen off-thread. */
 	public void note(String text) {
 		synchronized (log) {
@@ -624,6 +746,7 @@ public final class TaskObserver {
 
 	private JsonObject note0(String text) {
 		JsonObject e = new JsonObject();
+		e.addProperty("seq", ++eventSeq);
 		e.addProperty("t", ticks);
 		e.addProperty("ms", System.currentTimeMillis() - startedMs);
 		e.addProperty("text", text);

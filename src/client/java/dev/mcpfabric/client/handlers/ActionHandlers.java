@@ -3,6 +3,7 @@ package dev.mcpfabric.client.handlers;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+
 import dev.mcpfabric.McpFabric;
 import dev.mcpfabric.bridge.Json;
 import dev.mcpfabric.bridge.RpcContext;
@@ -26,7 +27,13 @@ import dev.mcpfabric.client.tasks.TaskModules;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.item.Item;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * The slow, goal-oriented actions: each drives a whole multi-tick behaviour and returns only when it
@@ -60,7 +67,18 @@ public final class ActionHandlers {
 
 		router.register("action.status", ctx -> TaskManager.get().status());
 
-		router.register("action.observe", ctx -> TaskManager.get().observe());
+		// The watch as a stream rather than a snapshot: hand back the 'seq' from the last read and get
+		// everything that changed since. Nothing has to be caught at the one moment it was true.
+		router.register("action.observe", ctx -> {
+			JsonObject p = ctx.params();
+			long since = p.has("sinceSeq") && p.get("sinceSeq").isJsonPrimitive() ? p.get("sinceSeq").getAsLong() : 0L;
+			return TaskManager.get().observe(since);
+		});
+
+		// Parallel input/output: several calls in one round trip, dispatched at the same time on their
+		// own threads. Reading the world while an action runs should not cost a trip per read, and none
+		// of it needs to wait its turn behind the others.
+		router.register("rpc.batch", ctx -> batch(router, ctx));
 
 		// React to whatever the observation says is wrong, in one call. The remedy is the one the
 		// observer already computed (tool + arguments + the offending entity), and it goes out after a
@@ -100,11 +118,79 @@ public final class ActionHandlers {
 		if (!"stop".equals(onFailure) && !"continue".equals(onFailure)) {
 			throw RpcException.badRequest("'onFailure' is 'stop' (default) or 'continue'; got '" + onFailure + "'.");
 		}
+		JsonArray steps = p.getAsJsonArray("steps");
+		if (steps.size() > MAX_PLAN_STEPS) {
+			throw RpcException.badRequest("A plan takes at most " + MAX_PLAN_STEPS + " steps. Long plans are the "
+					+ "thing to avoid here: the world moves while a plan runs, and every step after the first is "
+					+ "written before the first one's outcome is known. Send a short plan, read what came back "
+					+ "(action.status / observe), then send the next one.");
+		}
 		JsonObject guard = p.has("guard") && p.get("guard").isJsonObject() ? p.getAsJsonObject("guard") : new JsonObject();
-		return new PlanTask(router, p.getAsJsonArray("steps"), "continue".equals(onFailure),
+		return new PlanTask(router, steps, "continue".equals(onFailure),
 				optDouble(guard, "abortIfHealthBelow", 0.0),
 				optInt(guard, "abortIfAirBelow", 0),
 				optBool(guard, "abortIfDead", false));
+	}
+
+	// --- parallel I/O -----------------------------------------------------------------------------
+
+	/** Steps a single plan may contain. Short enough that the caller can still steer the outcome. */
+	private static final int MAX_PLAN_STEPS = 8;
+
+	/** Dispatch pool for {@code rpc.batch}; small, because each call is mostly waiting on the game thread. */
+	private static final Executor BATCH_POOL = Executors.newFixedThreadPool(4, r -> {
+		Thread t = new Thread(r, "mcpfabric-batch");
+		t.setDaemon(true);
+		return t;
+	});
+
+	/**
+	 * Run several calls at once and return all of their results, in order.
+	 *
+	 * <p>The HTTP bridge already serves requests on a thread pool, so this exists for the other half of
+	 * the problem: a caller that wants to read three things, or read while acting, should not have to
+	 * make three round trips and wait for each. The calls here run concurrently — a slow one does not
+	 * hold up a fast one — and each result is the full envelope it would have had on its own, so a
+	 * failure in one is visible as that one failing rather than as the batch failing.
+	 */
+	private static JsonObject batch(RpcRouter router, RpcContext ctx) throws RpcException {
+		JsonObject p = ctx.params();
+		if (!p.has("calls") || !p.get("calls").isJsonArray()) {
+			throw RpcException.badRequest("Missing 'calls': give an array of {\"method\":\"...\",\"params\":{...}}.");
+		}
+		JsonArray calls = p.getAsJsonArray("calls");
+		if (calls.isEmpty() || calls.size() > 24) {
+			throw RpcException.badRequest("'calls' takes 1..24 entries; got " + calls.size() + ".");
+		}
+		JsonObject[] results = new JsonObject[calls.size()];
+		List<CompletableFuture<Void>> pending = new ArrayList<>();
+		for (int i = 0; i < calls.size(); i++) {
+			final int idx = i;
+			JsonObject call = calls.get(i).getAsJsonObject();
+			String method = call.has("method") && call.get("method").isJsonPrimitive()
+					? call.get("method").getAsString() : null;
+			JsonObject params = call.has("params") && call.get("params").isJsonObject()
+					? call.getAsJsonObject("params") : new JsonObject();
+			pending.add(CompletableFuture.runAsync(() -> results[idx] = router.dispatch(method, params), BATCH_POOL));
+		}
+		try {
+			CompletableFuture.allOf(pending.toArray(new CompletableFuture[0])).get(60L, TimeUnit.SECONDS);
+		} catch (Exception e) {
+			throw RpcException.unavailable("A batched call did not finish in time: " + e.getMessage());
+		}
+		JsonArray out = new JsonArray();
+		int ok = 0;
+		for (JsonObject r : results) {
+			if (r == null) r = Json.envelopeError("internal", "no result from this call", null);
+			JsonElement okFlag = r.get("ok");
+			if (okFlag != null && okFlag.getAsBoolean()) ok++;
+			out.add(r);
+		}
+		JsonObject o = new JsonObject();
+		o.add("results", out);
+		o.addProperty("okCount", ok);
+		o.addProperty("count", out.size());
+		return o;
 	}
 
 	// --- modules ----------------------------------------------------------------------------------
@@ -115,6 +201,12 @@ public final class ActionHandlers {
 				optBool(p, "sprint", false));
 	}
 
+	/**
+	 * Mine one block. Deliberately without judgement: it digs the block it is given, wherever that is.
+	 * Whether a block is worth digging — including whether it sits in water — is a decision, and
+	 * decisions belong to the caller. The facts for it come from {@code vision.scan} ({@code wet},
+	 * {@code inReach}, {@code hardness}), not from a rule buried in here.
+	 */
 	static ClientTask mineBlock(JsonObject p) throws RpcException {
 		return new MineBlockTask(goal(p, "mineBlock"));
 	}

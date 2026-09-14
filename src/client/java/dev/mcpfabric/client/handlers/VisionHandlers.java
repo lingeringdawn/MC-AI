@@ -1,6 +1,7 @@
 package dev.mcpfabric.client.handlers;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.platform.NativeImage;
@@ -8,12 +9,15 @@ import dev.mcpfabric.McpFabric;
 import dev.mcpfabric.bridge.RpcException;
 import dev.mcpfabric.bridge.RpcRouter;
 import dev.mcpfabric.client.ClientMc;
+import dev.mcpfabric.client.Vision;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Screenshot;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.EntityHitResult;
@@ -23,9 +27,12 @@ import net.minecraft.world.phys.Vec3;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 
 /** Vision: framebuffer screenshot (for vision models) and a structured scene description. */
 public final class VisionHandlers {
@@ -128,6 +135,118 @@ public final class VisionHandlers {
 			o.add("rays", grid);
 			return o;
 		}));
+
+		// What the player can SEE, as a list of the blocks the field of view actually lands on. This is
+		// the reading to make decisions from: every entry is something the player could point at, the
+		// line of sight to it is clear by construction, and liquid is reported rather than hidden, so
+		// "mine that log" can be answered with "that one is in water".
+		router.register("vision.scan", ctx -> ClientMc.call(() -> {
+			LocalPlayer p = ClientMc.player();
+			Minecraft mc = ClientMc.mc();
+			double maxDistance = ctx.optDouble("maxDistance", Vision.DEFAULT_DISTANCE);
+			int cols = Math.max(3, Math.min(41, ctx.optInt("rayColumns", 13)));
+			int rows = Math.max(2, Math.min(21, ctx.optInt("rayRows", 7)));
+			int limit = Math.max(1, Math.min(64, ctx.optInt("maxResults", 24)));
+			Predicate<String> filter = idFilter(ctx);
+			List<Vision.Seen> seen = Vision.blocks(mc, maxDistance, cols, rows, filter, limit);
+
+			JsonObject o = new JsonObject();
+			o.addProperty("yaw", p.getYRot());
+			o.addProperty("pitch", p.getXRot());
+			o.addProperty("maxDistance", maxDistance);
+			o.addProperty("rays", cols * rows);
+			JsonArray blocks = new JsonArray();
+			for (Vision.Seen s : seen) {
+				JsonObject b = new JsonObject();
+				b.addProperty("id", s.id());
+				b.add("pos", blockPos(s.pos()));
+				b.addProperty("distance", round(s.distance()));
+				b.addProperty("inReach", s.inReach());
+				b.addProperty("wet", s.wet());
+				b.addProperty("hardness", round(s.hardness()));
+				blocks.add(b);
+			}
+			o.add("blocks", blocks);
+			o.addProperty("count", blocks.size());
+			o.add("entities", visibleEntities(mc, p, ClientMc.level(), maxDistance));
+			o.add("lookingAt", crosshair(mc, ClientMc.level()));
+			o.addProperty("note", "Only what the eye can see from where it is pointed: turn the camera "
+					+ "and scan again. 'wet' means the block sits in liquid and 'inReach' means it is close "
+					+ "enough to act on — facts to choose between, not a recommendation. Nothing here "
+					+ "decides for you, and mine_block digs whatever position you give it.");
+			return o;
+		}));
+	}
+
+	/** Keep only the block ids the caller asked for, or everything solid when it asked for nothing. */
+	private static Predicate<String> idFilter(dev.mcpfabric.bridge.RpcContext ctx) {
+		JsonObject p = ctx.params();
+		if (!p.has("ids") || !p.get("ids").isJsonArray()) return null;
+		JsonArray ids = p.getAsJsonArray("ids");
+		List<String> wants = new ArrayList<>();
+		for (JsonElement e : ids) {
+			if (e != null && e.isJsonPrimitive()) wants.add(e.getAsString());
+		}
+		if (wants.isEmpty()) return null;
+		return id -> {
+			for (String w : wants) {
+				// A trailing '*' is a prefix, so ["minecraft:*_log"] covers every wood type in one entry.
+				if (w.endsWith("*") ? id.startsWith(w.substring(0, w.length() - 1)) : w.equals(id)) return true;
+			}
+			return false;
+		};
+	}
+
+	/**
+	 * Entities the player can see: inside the view cone, with nothing solid between. Distance alone is
+	 * not sight — a zombie behind a wall is not something to swing at.
+	 */
+	private static JsonArray visibleEntities(Minecraft mc, LocalPlayer p, ClientLevel level, double maxDistance) {
+		JsonArray out = new JsonArray();
+		Vec3 eye = p.getEyePosition();
+		Vec3 look = p.getLookAngle();
+		for (Entity e : level.entitiesForRendering()) {
+			if (e == p || !e.isAlive()) continue;
+			Vec3 to = e.getEyePosition().subtract(eye);
+			double d = to.length();
+			if (d > maxDistance || d < 0.1) continue;
+			if (to.normalize().dot(look) < 0.5) continue; // outside the cone
+			BlockHitResult hit = level.clip(new ClipContext(eye, e.getEyePosition(),
+					ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, p));
+			if (hit.getType() == HitResult.Type.BLOCK && hit.getLocation().distanceTo(eye) < d - 0.2) continue;
+			JsonObject j = new JsonObject();
+			j.addProperty("name", e.getName().getString());
+			j.addProperty("id", BuiltInRegistries.ENTITY_TYPE.getKey(e.getType()).toString());
+			j.addProperty("distance", round(d));
+			j.addProperty("inReach", d <= Vision.REACH);
+			out.add(j);
+			if (out.size() >= 12) break;
+		}
+		return out;
+	}
+
+	/** What the crosshair is on — the same payload describeScene reports. */
+	private static JsonObject crosshair(Minecraft mc, ClientLevel level) {
+		JsonObject o = new JsonObject();
+		HitResult hit = mc.hitResult;
+		if (hit instanceof BlockHitResult bhr && hit.getType() == HitResult.Type.BLOCK) {
+			BlockPos bp = bhr.getBlockPos();
+			o.addProperty("type", "block");
+			o.addProperty("id", BuiltInRegistries.BLOCK.getKey(level.getBlockState(bp).getBlock()).toString());
+			o.add("pos", blockPos(bp));
+			o.addProperty("wet", Vision.wet(level, bp));
+		} else if (hit instanceof EntityHitResult ehr) {
+			o.addProperty("type", "entity");
+			o.addProperty("id", BuiltInRegistries.ENTITY_TYPE.getKey(ehr.getEntity().getType()).toString());
+			o.addProperty("name", ehr.getEntity().getName().getString());
+		} else {
+			o.addProperty("type", "none");
+		}
+		return o;
+	}
+
+	private static double round(double v) {
+		return Math.round(v * 100.0) / 100.0;
 	}
 
 	/** The main framebuffer. {@code Minecraft.getMainRenderTarget()} moved to {@code gameRenderer.mainRenderTarget()} in 26.2. */

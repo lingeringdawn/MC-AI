@@ -13,6 +13,7 @@ import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.HitResult;
 
 import java.util.Comparator;
+import java.util.List;
 import java.util.UUID;
 import java.util.function.Predicate;
 
@@ -33,7 +34,8 @@ public final class Targets {
 	private static final double SEARCH_RADIUS = 48.0;
 
 	/** The full vocabulary, for error messages and tool descriptions. */
-	public static final String SPECS = "\"nearest_hostile\", \"nearest_drop\", \"nearest_animal\", \"looking_at\"";
+	public static final String SPECS = "\"nearest_hostile\", \"nearest_drop\", \"nearest_animal\", "
+			+ "\"looking_at\", \"visible_log\", \"visible_stone\", \"visible:<block id>\"";
 
 	private Targets() {}
 
@@ -41,6 +43,11 @@ public final class Targets {
 	public static BlockPos block(String spec, String what) throws RpcException {
 		LocalPlayer p = requirePlayer();
 		switch (spec) {
+			case "visible_log":
+				return visible(p, s -> s.id().endsWith("_log"), "log", what).pos();
+			case "visible_stone":
+				return visible(p, s -> s.id().endsWith("stone") || s.id().contains("deepslate"),
+						"stone", what).pos();
 			case "looking_at": {
 				HitResult hit = ClientMc.mc().hitResult;
 				if (hit instanceof BlockHitResult b && hit.getType() == HitResult.Type.BLOCK) return b.getBlockPos();
@@ -63,9 +70,36 @@ public final class Targets {
 				return animal.blockPosition();
 			}
 			default:
+				if (spec.startsWith("visible:")) {
+					String want = spec.substring("visible:".length());
+					if (want.isBlank()) {
+						throw RpcException.badRequest("'visible:' needs a block id, e.g. \"visible:minecraft:stone\".");
+					}
+					return visible(p, s -> s.id().equals(want), want, what).pos();
+				}
 				throw RpcException.badRequest("Unknown target '" + spec + "' for " + what
 						+ ". Use one of: " + SPECS + ".");
 		}
+	}
+
+	/**
+	 * The nearest block of a kind the player can <em>see</em> from where the player is looking.
+	 *
+	 * <p>Vision, not a chunk scan: only blocks the field of view actually lands on count, so the answer
+	 * is always something the player could point at. It returns the nearest match and nothing else — no
+	 * ranking, no preference, and no opinion about whether the block is a good idea to dig. A log
+	 * standing in water is still a log, and choosing between it and a dry one is the caller's decision.
+	 * The per-block facts to decide on ({@code wet}, {@code inReach}, {@code hardness}) are what
+	 * {@code vision.scan} reports; read that when the choice matters.
+	 */
+	private static Vision.Seen visible(LocalPlayer p, Predicate<Vision.Seen> kind, String described, String what)
+			throws RpcException {
+		for (Vision.Seen s : Vision.blocks(ClientMc.mc(), Vision.DEFAULT_DISTANCE, 13, 7, null, 40)) {
+			if (kind.test(s)) return s;
+		}
+		throw RpcException.unavailable("No " + described + " is visible from where the player is looking, so '"
+				+ what + "' has nothing to act on. Turn the camera toward it (control.lookAt) and scan "
+				+ "again — 'visible_*' targets are what the eye can see, not what the chunks contain.");
 	}
 
 	/** The UUID of the entity the spec names. */

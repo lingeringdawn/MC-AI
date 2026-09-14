@@ -45,7 +45,9 @@ const vec3 = () => ({
  */
 const TARGET_SPEC =
   '"nearest_hostile" (closest hostile mob), "nearest_drop" (closest dropped item), ' +
-  '"nearest_animal", "looking_at" (whatever the crosshair is on)';
+  '"nearest_animal", "looking_at" (whatever the crosshair is on), ' +
+  '"visible_log" / "visible_stone" / "visible:<block id>" (nearest block of that kind the eye can ' +
+  'actually see from where the player is looking — turn the camera first if it is not in view)';
 
 /** x/y/z or 'target', for the tools that accept either. */
 const goalArgs = () => ({
@@ -660,8 +662,36 @@ export const TOOLS: ToolDef[] = [
     },
     annotations: READ,
   },
+  {
+    name: "scan_visible",
+    method: "vision.scan",
+    title: "Scan what the player can actually see",
+    description:
+      "Client-only, READ-ONLY. Sweep the field of view and list the blocks the rays actually land on, " +
+      "nearest first — what the player can point at, not what the loaded chunks happen to contain. Every " +
+      "entry is a real sighting: a ray reached it, so the line of sight is clear by construction, and a " +
+      "trunk behind a hill or a drop behind a wall is simply not in the list. Each block carries its " +
+      "distance, whether it is 'wet' (sitting in liquid), whether it is 'inReach', and its 'hardness' — " +
+      "the facts to choose between, since this call recommends nothing and decides nothing. Turn the " +
+      "camera (control_look_at) and scan again to look somewhere else; that is the same loop a player " +
+      "runs with their eyes, and it is the honest way to pick the next thing to mine. Also lists visible " +
+      "entities (in the cone, nothing solid between) and what the crosshair is on.",
+    inputSchema: {
+      maxDistance: z.number().min(1).max(96).optional().default(24).describe("How far the rays travel."),
+      rayColumns: z.number().int().min(1).max(41).optional().default(13).describe("Rays across the view; more is a finer sweep."),
+      rayRows: z.number().int().min(1).max(21).optional().default(7).describe("Rays down the view."),
+      ids: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Keep only these block ids. A trailing * is a prefix, e.g. ["minecraft:oak_log"] or ["minecraft:*_log"].',
+        ),
+      maxResults: z.number().int().min(1).max(64).optional().default(24),
+    },
+    annotations: READ,
+  },
 
-  // ===== actions (client, blocking) ==========================================================
+  // ===== actions (client, non-blocking) ======================================================
   {
     name: "run_plan",
     method: "action.do",
@@ -696,8 +726,13 @@ export const TOOLS: ToolDef[] = [
             .passthrough(),
         )
         .min(1)
-        .max(64)
-        .describe("The steps, in order. Give exactly one of 'action' or 'rpc' per step."),
+        .max(8)
+        .describe(
+          "The steps, in order — at most 8. Keep plans SHORT: every step after the first is written before " +
+            "the first one's outcome is known, so a long plan is a guess that the world will move out from " +
+            "under. Send a few steps, read what came back, then send the next. Give exactly one of 'action' " +
+            "or 'rpc' per step.",
+        ),
       onFailure: z
         .enum(["stop", "continue"])
         .optional()
@@ -763,14 +798,56 @@ export const TOOLS: ToolDef[] = [
     annotations: WRITE,
   },
   {
+    name: "batch",
+    method: "rpc.batch",
+    title: "Run several calls at once (parallel)",
+    description:
+      "Dispatch up to 24 calls in ONE round trip, concurrently — a slow one does not hold up a fast one. " +
+      "This is how to read and act at the same time without serialising yourself: poll the running action, " +
+      "read the watch stream and scan the view together in a single call, instead of three round trips one " +
+      "after another. Each result is the full envelope it would have had on its own ({ok, result} or " +
+      "{ok, error}) in the order the calls were listed, so a failure shows up as that call failing rather " +
+      "than as the batch failing. It removes the round trips, not the physics: game-side effects still " +
+      "land on the game thread one tick at a time.",
+    inputSchema: {
+      calls: z
+        .array(
+          z.object({
+            method: z
+              .string()
+              .describe('Any RPC method, e.g. "action.status", "action.observe", "vision.scan", "player.getState".'),
+            params: z.record(z.string(), z.unknown()).optional().describe("That method's parameters."),
+          }),
+        )
+        .min(1)
+        .max(24)
+        .describe("The calls to run, in parallel."),
+    },
+    annotations: READ,
+  },
+
+  {
     name: "action_status",
     method: "action.status",
     title: "Current action status",
     description:
-      "Client-only. Report the running/blocking action's state, its settled result (if any), and a full live " +
-      'observation snapshot under "observe" (vitals, hostiles, drops, crosshair, progress, rolling log, danger level). ' +
-      "Poll this while a long action runs to watch the world instead of waiting blindly.",
-    inputSchema: {},
+      "Client-only, READ-ONLY. The running action's state, its settled result (if any), and the live " +
+      'observation snapshot under "observe" (vitals, hostiles, drops, crosshair, what the eye can see, ' +
+      "progress, rolling log, danger level). Nothing blocks, so this is how you follow an action: poll it " +
+      'while the action runs. Pass "sinceSeq" — the observe.seq you read last time — and the watch comes ' +
+      "back as a stream rather than a snapshot: newEvents lists every change since then (a hit taken, air " +
+      "ticking down, food slipping, a step into new ground) with its own sequence number, so nothing has " +
+      "to be caught at the exact moment it was true.",
+    inputSchema: {
+      sinceSeq: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe(
+          "The observe.seq from your last read. Omit for the current snapshot; pass it to also get every change since.",
+        ),
+    },
     annotations: READ,
   },
   {
@@ -811,8 +888,19 @@ export const TOOLS: ToolDef[] = [
       "deals with it, arguments included — pass it to 'react' to act immediately.\n" +
       "This is the ONLY source of awareness: the mod never acts on its own — it will not surface, fight, retreat or " +
       "save itself unless you call for it — so read this, then issue the short action you want. " +
-      "Works whether idle or mid-action.",
-    inputSchema: {},
+      "Works whether idle or mid-action, and it is sampled EVERY tick — including while nothing is running — " +
+      'so the watch never stops. Pass "sinceSeq" (the seq you read last time) to get newEvents: every change ' +
+      "since then, each with its own sequence number, instead of having to poll fast enough to catch things " +
+      "as they flash by. The snapshot also carries 'visible' — what the eye can actually see right now — so " +
+      "you never have to stop watching in order to go and look.",
+    inputSchema: {
+      sinceSeq: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe("The seq from your last read; with it you also get every change since (newEvents)."),
+    },
     annotations: READ,
   },
   {
