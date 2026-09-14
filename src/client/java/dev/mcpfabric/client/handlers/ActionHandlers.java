@@ -10,15 +10,11 @@ import dev.mcpfabric.bridge.RpcException;
 import dev.mcpfabric.bridge.RpcRouter;
 import dev.mcpfabric.client.ClientMc;
 import dev.mcpfabric.client.tasks.AnomalyResponder;
-import dev.mcpfabric.client.tasks.ApproachTask;
-import dev.mcpfabric.client.tasks.AttackTask;
 import dev.mcpfabric.client.tasks.ClientTask;
 import dev.mcpfabric.client.tasks.SwingTask;
-import dev.mcpfabric.client.tasks.CollectItemsTask;
 import dev.mcpfabric.client.tasks.CraftTask;
 import dev.mcpfabric.client.tasks.EatTask;
 import dev.mcpfabric.client.tasks.MineBlockTask;
-import dev.mcpfabric.client.tasks.MineVeinTask;
 import dev.mcpfabric.client.tasks.MlgTask;
 import dev.mcpfabric.client.tasks.MoveToTask;
 import dev.mcpfabric.client.tasks.RetreatTask;
@@ -47,28 +43,12 @@ public final class ActionHandlers {
 				BlockPos.containing(ctx2.getDouble("x"), ctx2.getDouble("y"), ctx2.getDouble("z"))),
 				ctx.optInt("timeoutSeconds", 30)));
 
-		router.register("action.mineVein", ctx -> run(ctx, ctx2 -> new MineVeinTask(
-				BlockPos.containing(ctx2.getDouble("x"), ctx2.getDouble("y"), ctx2.getDouble("z")),
-				Math.max(1, Math.min(512, ctx2.optInt("max", 64)))),
-				ctx.optInt("timeoutSeconds", 60)));
-
-		router.register("action.collectItems", ctx -> run(ctx, ctx2 -> new CollectItemsTask(
-				ctx2.optDouble("radius", 16.0)), ctx.optInt("timeoutSeconds", 30)));
-
 		router.register("action.eat", ctx -> run(ctx, ctx2 -> new EatTask(), ctx.optInt("timeoutSeconds", 20)));
 
-		// Combat is a composition of short steps, so the default budget stays small: an attack call
-		// closes the gap and trades a few blows, then returns. The caller composes the next call.
-		router.register("action.attack", ctx -> run(ctx, ctx2 -> new AttackTask(
-				uuid(ctx2, "uuid"), Math.max(0, ctx2.optInt("maxSwings", 0))),
-				ctx.optInt("timeoutSeconds", 10)));
-
-		router.register("action.approach", ctx -> run(ctx, ctx2 -> new ApproachTask(
-				uuid(ctx2, "uuid"), Math.max(0.5, ctx2.optDouble("reach", 2.5))),
-				ctx.optInt("timeoutSeconds", 10)));
-
+		// Hit an entity. Deliberately a single module: closing the distance is a moveTo, stepping back is
+		// a moveTo, keeping at it is another swing — the caller composes the fight.
 		router.register("action.swing", ctx -> run(ctx, ctx2 -> new SwingTask(
-				uuid(ctx2, "uuid"), Math.max(0, ctx2.optInt("swings", 1))),
+				uuid(ctx2, "uuid"), Math.max(0, ctx2.optInt("hits", 1))),
 				ctx.optInt("timeoutSeconds", 10)));
 
 		// Withdraw from something. Nothing calls this on the bot's own initiative: the observation feed

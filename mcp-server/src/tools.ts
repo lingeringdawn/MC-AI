@@ -71,6 +71,21 @@ const waitSeconds = (maxTimeout: number) =>
         `progress, rolling log) plus "elapsedMs"/"remainingMs"/"progress".`,
     );
 
+/**
+ * How this mod is meant to be driven, stated once so every action tool can lean on it. There are no
+ * composite behaviours on the mod side — no "chop this tree", no "fight this mob until it dies", no
+ * "gather everything nearby". Each action is one small physical step, and the caller decides the
+ * sequence: observe, act, observe, act.
+ */
+const COMPOSE_NOTE =
+  " MODULES ARE COMPOSED BY YOU, NOT BY THE MOD: there is no 'chop a tree', 'kill that mob' or " +
+  "'pick up the loot' behaviour to call. Each action does one step and returns, and you chain them — " +
+  "mine_block per log (move_to first if the trunk is a different level, re-read world.find_blocks after " +
+  "each one, since felling a trunk exposes the next), then move_to onto the drops so the player picks " +
+  "them up, then inventory/craft. Same for a fight: retrieve the mob, move_to into range while it is " +
+  "still where you last saw it, swing_at_entity, then re-observe and recompose. Keep each call short, " +
+  "read the world between steps, and change your plan when it no longer matches.";
+
 /** The live-watch payload attached to every action result. */
 const OBSERVE_NOTE =
   ' The result includes an "observe" snapshot sampled every tick while it ran: vitals, nearby hostiles, drops on the ' +
@@ -654,24 +669,12 @@ export const TOOLS: ToolDef[] = [
     method: "action.mineBlock",
     title: "Mine a block (blocking)",
     description:
-      "Client-only, BLOCKING. The whole 'dig this block' intent in one call: walk into reach (A*), face the block, auto-select the best tool in the hotbar, then mine with realistic survival timing until the block is gone. Returns state mined / unreachable / timeout." +
+      "Client-only, BLOCKING. One block, start to finish: walk into reach (A*), face it, auto-select the best tool in the hotbar, mine with realistic survival timing, and return when it is gone. Returns state mined / unreachable / timeout. " +
+      "It mines exactly the one block you named — it does not follow a vein or fell a tree for you." +
+      COMPOSE_NOTE +
       OBSERVE_NOTE,
     inputSchema: {
       ...vec3(),
-      timeoutSeconds: z.number().int().min(1).max(120).optional().default(30),
-      waitSeconds: waitSeconds(120),
-    },
-    annotations: WRITE,
-  },
-  {
-    name: "collect_items",
-    method: "action.collectItems",
-    title: "Collect nearby drops (blocking)",
-    description:
-      "Client-only, BLOCKING. Walk over dropped item entities within 'radius' so the player picks them up; returns when none remain in range or the budget elapses." +
-      OBSERVE_NOTE,
-    inputSchema: {
-      radius: z.number().min(1).max(48).optional().default(16),
       timeoutSeconds: z.number().int().min(1).max(120).optional().default(30),
       waitSeconds: waitSeconds(120),
     },
@@ -740,22 +743,6 @@ export const TOOLS: ToolDef[] = [
   },
 
   {
-    name: "mine_vein",
-    method: "action.mineVein",
-    title: "Mine a whole vein/tree (blocking)",
-    description:
-      "Client-only, BLOCKING. Mine a connected cluster of same-id blocks — a whole tree, an ore vein, a stack of logs. Walks between blocks as needed and follows the cluster to exhaustion (bounded by 'max'). One call = 'chop that tree down'." +
-      OBSERVE_NOTE,
-    inputSchema: {
-      ...vec3(),
-      max: z.number().int().min(1).max(512).optional().default(64).describe("Maximum number of blocks to mine."),
-      timeoutSeconds: z.number().int().min(1).max(300).optional().default(60),
-      waitSeconds: waitSeconds(300),
-    },
-    annotations: WRITE,
-  },
-
-  {
     name: "eat",
     method: "action.eat",
     title: "Eat food until full (blocking)",
@@ -768,52 +755,17 @@ export const TOOLS: ToolDef[] = [
     annotations: WRITE,
   },
   {
-    name: "attack",
-    method: "action.attack",
-    title: "Fight an entity in short steps (blocking)",
-    description:
-      "Client-only, BLOCKING. Fights an entity by composing SHORT steps: each cycle closes the gap (A*) or trades blows once in range, then re-plans against where the target actually is now. " +
-      "Swinging only happens when the attack cooldown is fully charged (no spam-clicking), and while fighting the bot moves like a person — reacts once, circle-strafes, steps back after landing a hit, jumps to crit. " +
-      "The default budget is deliberately short (~10s) so the fight is a series of small, watchable calls rather than one long commit: call it again to continue, or stop and do something else. " +
-      "For full manual control, compose 'approach_entity' and 'swing_at_entity' yourself instead." +
-      OBSERVE_NOTE,
-    inputSchema: {
-      uuid: z.string().describe("Entity UUID to attack."),
-      maxSwings: z.number().int().min(0).max(500).optional().default(0).describe("Stop after this many landed hits (0 = keep going until the budget runs out)."),
-      timeoutSeconds: z.number().int().min(1).max(120).optional().default(10),
-      waitSeconds: waitSeconds(120),
-    },
-    annotations: WRITE,
-  },
-  {
-    name: "approach_entity",
-    method: "action.approach",
-    title: "Walk into range of an entity (blocking, short)",
-    description:
-      "Client-only, BLOCKING. One short step: walk until the entity is within 'reach' blocks, then return. Re-plans as the target moves instead of committing to a long route. " +
-      "Returns state 'reached' / 'budget' (out of time, call again to keep closing) / 'not_found' / 'no_path'. " +
-      "Compose it with swing_at_entity for full control over a fight, or use 'attack' to have that composed for you." +
-      OBSERVE_NOTE,
-    inputSchema: {
-      uuid: z.string().describe("Entity UUID to approach."),
-      reach: z.number().min(0.5).max(16).optional().default(2.5).describe("Stop when this close to the entity."),
-      timeoutSeconds: z.number().int().min(1).max(60).optional().default(10),
-      waitSeconds: waitSeconds(60),
-    },
-    annotations: WRITE,
-  },
-  {
     name: "swing_at_entity",
     method: "action.swing",
-    title: "Hit an entity already in range (blocking, short)",
+    title: "Hit an entity (blocking, short)",
     description:
-      "Client-only, BLOCKING. One short step: aim at an entity that is ALREADY within melee range and swing until 'swings' hits land or the step budget runs out. Never walks anywhere. " +
-      "Returns state 'swung' (budget met) / 'killed' / 'out_of_reach' (target moved away — compose an approach_entity step) / 'budget' / 'target_gone'. " +
-      "Moves like a person while fighting: reacts once, circle-strafes, steps back after a hit, jumps to crit. Pair with approach_entity to drive a fight yourself." +
+      "Client-only, BLOCKING. One module, no policy: aim at the entity and swing until 'hits' hits land or the budget runs out. It never walks, never strafes and never picks a target — closing the distance is a move_to, stepping back is a move_to, and 'keep hitting until it dies' is calling this again. " +
+      "Only swings when the target is within reach and the attack cooldown is charged, so every hit is a full-damage one. " +
+      "Returns state 'hit' (hits met) / 'killed' / 'out_of_reach' (it moved — close the gap yourself) / 'budget' / 'target_gone' / 'not_found', plus 'damageDealt' measured from the target's health bar." +
       OBSERVE_NOTE,
     inputSchema: {
       uuid: z.string().describe("Entity UUID to hit."),
-      swings: z.number().int().min(0).max(64).optional().default(1).describe("Stop after this many landed hits (0 = keep swinging for the whole step budget)."),
+      hits: z.number().int().min(0).max(64).optional().default(1).describe("Stop after this many landed hits (0 = keep swinging for the whole budget)."),
       timeoutSeconds: z.number().int().min(1).max(60).optional().default(10),
       waitSeconds: waitSeconds(60),
     },
