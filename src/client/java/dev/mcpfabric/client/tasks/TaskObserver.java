@@ -689,6 +689,15 @@ public final class TaskObserver {
 		now.addProperty("eventSeq", eventSeq);
 	}
 
+	/**
+	 * Record something that happened, from outside the observer (a rule firing, for instance).
+	 * Public so a firing shows up in {@code newEvents} — where a caller watching the stream will see
+	 * it — rather than only in the log that a snapshot reader may never look at.
+	 */
+	public void record(String kind, String text) {
+		event(kind, text);
+	}
+
 	/** Record a change with its own sequence number. */
 	private void event(String kind, String text) {
 		JsonObject e = note0(text);

@@ -122,6 +122,31 @@ final class BlockMiner {
 		// rather than pushing a break the game is no longer tracking.
 		if (!crosshairOn(mc, pos)) {
 			settleTicks = 0;
+			// The crosshair is not on the target. If it is resting on something else that is in reach,
+			// that thing is what the next click would actually hit — a leaf over a trunk, a vine over a
+			// log — so dig through it. Returning here instead is what made a log under its own canopy
+			// unmineable: the aim was right, the crosshair was on the leaf, and the miner simply waited
+			// for the crosshair to move on its own until the budget ran out.
+			BlockHitResult on = mc.hitResult instanceof BlockHitResult b && b.getType() == HitResult.Type.BLOCK ? b : null;
+			BlockPos blocking = on == null ? null : on.getBlockPos();
+			if (blocking != null && !blocking.equals(pos)
+					&& p.getEyePosition().distanceTo(Vec3.atCenterOf(blocking)) <= REACH) {
+				if (clearing == null || !clearing.equals(blocking)) {
+					if (clears >= MAX_CLEARS) {
+						stopDigging();
+						return State.UNREACHABLE;
+					}
+					clearing = blocking.immutable();
+					clears++;
+				}
+				if (level.getBlockState(clearing).isAir()) {
+					clearing = null;
+					return State.WORKING;
+				}
+				// Crosshair already rests on the obstruction — that is the whole point of this branch.
+				dig(mc, clearing);
+				return State.WORKING;
+			}
 			stopDigging();
 			return State.WORKING;
 		}

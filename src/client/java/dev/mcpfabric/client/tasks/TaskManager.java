@@ -89,6 +89,9 @@ public final class TaskManager {
 
 	/** Drive the active task; called from the client tick (game thread). */
 	public void tick(Minecraft mc) {
+		// The caller's own reflexes go first, before the task: a rule that says "air is running out,
+		// surface" has to be able to overrule whatever the task is doing, or it is not a reflex.
+		Rules.get().tick(mc, observer);
 		ClientTask t = current;
 		if (t == null) {
 			// Keep sampling even between tasks so an idle player is still observable.

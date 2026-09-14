@@ -164,6 +164,15 @@ public final class VisionHandlers {
 				b.addProperty("inReach", s.inReach());
 				b.addProperty("wet", s.wet());
 				b.addProperty("hardness", round(s.hardness()));
+				// See-through blocks (leaves, glass, water, plants) are reported too, and anything seen
+				// past one carries the list it was seen through — a trunk under its own canopy is a
+				// sighting with through:["minecraft:oak_leaves"], not a blank.
+				b.addProperty("transparent", s.transparent());
+				if (!s.through().isEmpty()) {
+					JsonArray thru = new JsonArray();
+					s.through().forEach(thru::add);
+					b.add("through", thru);
+				}
 				blocks.add(b);
 			}
 			o.add("blocks", blocks);
@@ -171,9 +180,13 @@ public final class VisionHandlers {
 			o.add("entities", visibleEntities(mc, p, ClientMc.level(), maxDistance));
 			o.add("lookingAt", crosshair(mc, ClientMc.level()));
 			o.addProperty("note", "Only what the eye can see from where it is pointed: turn the camera "
-					+ "and scan again. 'wet' means the block sits in liquid and 'inReach' means it is close "
-					+ "enough to act on — facts to choose between, not a recommendation. Nothing here "
-					+ "decides for you, and mine_block digs whatever position you give it.");
+					+ "and scan again. The rays pass through blocks that do not occlude — leaves, glass, "
+					+ "water, vines, plants — so a trunk behind foliage appears with "
+					+ "through:[\"minecraft:oak_leaves\"], and the foliage itself appears with "
+					+ "transparent:true (often the thing worth clearing first). 'wet' means the block sits "
+					+ "in liquid, 'inReach' means it is close enough to act on, 'hardness' is how slow it "
+					+ "will be: facts to choose between, not a recommendation. Nothing here decides for "
+					+ "you, and mine_block digs whatever position you give it.");
 			return o;
 		}));
 	}
@@ -190,11 +203,26 @@ public final class VisionHandlers {
 		if (wants.isEmpty()) return null;
 		return id -> {
 			for (String w : wants) {
-				// A trailing '*' is a prefix, so ["minecraft:*_log"] covers every wood type in one entry.
-				if (w.endsWith("*") ? id.startsWith(w.substring(0, w.length() - 1)) : w.equals(id)) return true;
+				if (glob(w, id)) return true;
 			}
 			return false;
 		};
+	}
+
+	/**
+	 * Match a block id against one of the caller's patterns, where {@code *} stands for any run of
+	 * characters — so {@code "minecraft:*_log"} covers every wood type and {@code "minecraft:oak_*"}
+	 * every oak block. Matching a literal id is the common case and costs nothing.
+	 */
+	private static boolean glob(String pattern, String id) {
+		if (pattern.indexOf('*') < 0) return pattern.equals(id);
+		String[] parts = pattern.split("\\*", -1);
+		StringBuilder rx = new StringBuilder();
+		for (int i = 0; i < parts.length; i++) {
+			if (i > 0) rx.append(".*");
+			rx.append(java.util.regex.Pattern.quote(parts[i]));
+		}
+		return id.matches(rx.toString());
 	}
 
 	/**

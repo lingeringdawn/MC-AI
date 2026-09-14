@@ -20,6 +20,7 @@ import dev.mcpfabric.client.tasks.MlgTask;
 import dev.mcpfabric.client.tasks.MoveToTask;
 import dev.mcpfabric.client.tasks.PlanTask;
 import dev.mcpfabric.client.tasks.RetreatTask;
+import dev.mcpfabric.client.tasks.Rules;
 import dev.mcpfabric.client.tasks.SurfaceTask;
 import dev.mcpfabric.client.tasks.SwingTask;
 import dev.mcpfabric.client.tasks.TaskManager;
@@ -64,6 +65,18 @@ public final class ActionHandlers {
 		}
 
 		registerPlan(router);
+
+		// The caller's own reflexes. The mod supplies the loop and nothing else: the conditions and the
+		// actions are the caller's sentences, replaced wholesale by the next rules.set, and every firing
+		// is reported in the observation stream.
+		Rules.get().bind(router);
+		router.register("rules.set", ctx -> Rules.get().set(ctx.params()));
+		router.register("rules.clear", ctx -> Rules.get().clear());
+		router.register("rules.list", ctx -> Rules.get().list());
+
+		// One call that answers "what can I do, with what, and what will it say back" — so understanding
+		// the module surface is a read, not an inference from a dozen tool descriptions.
+		router.register("action.help", ctx -> help());
 
 		router.register("action.status", ctx -> TaskManager.get().status());
 
@@ -130,6 +143,65 @@ public final class ActionHandlers {
 				optDouble(guard, "abortIfHealthBelow", 0.0),
 				optInt(guard, "abortIfAirBelow", 0),
 				optBool(guard, "abortIfDead", false));
+	}
+
+	// --- the module surface, in one call ----------------------------------------------------------
+
+	/**
+	 * The whole module surface: what each one does, what it takes, and what it says back.
+	 *
+	 * <p>Declared here, next to the modules themselves, so the description cannot drift away from the
+	 * code it describes. Reading this is meant to replace inferring the API from a pile of tool
+	 * descriptions: parameters, return states, the target vocabulary, the fields a scan reports and the
+	 * conditions a rule can use, all in one payload.
+	 */
+	private static JsonObject help() {
+		JsonObject o = new JsonObject();
+		JsonObject mods = new JsonObject();
+		mods.add("moveTo", module("Walk to a position and stop there.", "x,y,z or target",
+				"reachRadius=1, sprint=false, timeoutSeconds=30",
+				"done/reached, done/no_path, done/stuck, failed/timeout"));
+		mods.add("mineBlock", module("Mine exactly one block: walk into reach, aim at it, dig it.",
+				"x,y,z or target", "timeoutSeconds=30",
+				"done/mined, failed/unreachable, failed/timeout"));
+		mods.add("swing", module("Hit an entity that is already within reach. It never walks.",
+				"uuid or target", "hits=1, timeoutSeconds=10",
+				"done/hit, done/killed, done/out_of_reach, done/budget, failed/target_gone, failed/not_found"));
+		mods.add("eat", module("Eat from the hotbar.", "—", "timeoutSeconds=20", "done/ate, failed/no_food"));
+		mods.add("retreat", module("Back away from an entity or a place.",
+				"uuid or target, or x,y,z", "distance=6, timeoutSeconds=20", "done/clear, failed/timeout"));
+		mods.add("surface", module("Come up to air.", "—", "timeoutSeconds=20", "done/surfaced, failed/*"));
+		mods.add("mlg", module("Break a fall with a water bucket.", "—", "timeoutSeconds=20", "done/*, failed/*"));
+		mods.add("craft", module("Craft in the player's 2x2 grid (4 cells) or an open table (9 cells), "
+						+ "clicking one slot per tick so it is all visible in game.",
+				"grid[] of 4 or 9 item ids (null = empty cell), count=1", "timeoutSeconds=60",
+				"done/crafted, failed/no_recipe"));
+		o.add("modules", mods);
+		o.addProperty("targets", Targets.SPECS);
+		o.addProperty("ruleConditions", Rules.CONDITIONS);
+		o.addProperty("visionFields", "id, pos, distance, inReach, wet, hardness, transparent, through[] "
+				+ "(vision.scan). Rays pass through blocks that do not occlude — leaves, glass, water, vines, "
+				+ "plants — so a trunk under its own canopy comes back as a sighting with the leaves listed "
+				+ "in 'through', and the leaves themselves come back with transparent:true.");
+		o.addProperty("watchStream", "action.observe {sinceSeq} returns newEvents since that seq; "
+				+ "now.visible is what the eye can see on this tick.");
+		o.addProperty("planLimit", MAX_PLAN_STEPS);
+		o.addProperty("rules", "rules.set replaces the whole set; rules.list shows it; each firing is "
+				+ "reported in the stream as an event with kind 'rule'.");
+		o.addProperty("noPolicy", "None of these modules decides anything. Each does the one physical thing "
+				+ "it is named for, reports what happened and stops. There is no 'chop a tree', no 'kill that "
+				+ "mob', no refusal and no preference — the composing is yours, and the only standing "
+				+ "instructions are the rules you wrote.");
+		return o;
+	}
+
+	private static JsonObject module(String what, String params, String optional, String returns) {
+		JsonObject o = new JsonObject();
+		o.addProperty("does", what);
+		o.addProperty("params", params);
+		if (!"—".equals(optional)) o.addProperty("optional", optional);
+		o.addProperty("returns", returns);
+		return o;
 	}
 
 	// --- parallel I/O -----------------------------------------------------------------------------

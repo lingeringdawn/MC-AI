@@ -49,6 +49,15 @@ const TARGET_SPEC =
   '"visible_log" / "visible_stone" / "visible:<block id>" (nearest block of that kind the eye can ' +
   'actually see from where the player is looking — turn the camera first if it is not in view)';
 
+/**
+ * The condition vocabulary `rules_set` accepts — mirrors Rules.CONDITIONS on the mod side, so a rule
+ * reads like the observation it is watching.
+ */
+const RULES_CONDITIONS =
+  "dead, healthBelow, healthAbove, airBelow, foodBelow, underwater, inWater, inLava, onFire, onGround, " +
+  "fallingHard, hostileWithin (blocks), hostilesAtLeast, dropsAtLeast, itemCount:{itemId:count}, " +
+  "holding, visible:{id, atLeast, within}";
+
 /** x/y/z or 'target', for the tools that accept either. */
 const goalArgs = () => ({
   x: z.number().optional().describe("X coordinate. Give x/y/z, or 'target' instead."),
@@ -97,7 +106,11 @@ const COMPOSE_NOTE =
   "still where you last saw it, swing_at_entity, then re-observe and recompose. Keep each call short, " +
   "read the world between steps, and change your plan when it no longer matches. When you already know " +
   "the sequence, chain the steps in ONE run_plan call instead of one round-trip each; call them " +
-  "separately when you need to look at the world between the steps.";
+  "separately when you need to look at the world between the steps. " +
+  "Work in small batches, not long lists: a handful of steps, then look at what actually happened. " +
+  "And for anything routine — surfacing when the air runs low, disengaging at low health — write it once " +
+  "with rules_set rather than watching for it on every read: those rules are yours, they run every tick, " +
+  "and they are reported in the stream when they fire, so the reflex costs you no round trip at all.";
 
 /** The live-watch payload attached to every action result. */
 const OBSERVE_NOTE =
@@ -675,7 +688,12 @@ export const TOOLS: ToolDef[] = [
       "the facts to choose between, since this call recommends nothing and decides nothing. Turn the " +
       "camera (control_look_at) and scan again to look somewhere else; that is the same loop a player " +
       "runs with their eyes, and it is the honest way to pick the next thing to mine. Also lists visible " +
-      "entities (in the cone, nothing solid between) and what the crosshair is on.",
+      "entities (in the cone, nothing solid between) and what the crosshair is on.\n" +
+      "The rays pass THROUGH blocks that do not occlude — leaves, glass, water, vines, plants — so a trunk " +
+      'under its own canopy comes back as a sighting with through:["minecraft:oak_leaves"], and the foliage ' +
+      "comes back with transparent:true. That is usually what you want to see: the tree you are looking at " +
+      "is visible through the leaves, and the leaves are the thing to clear first when the shot is blocked. " +
+      "What occludes still ends the ray, so nothing is reported that the eye genuinely cannot reach.",
     inputSchema: {
       maxDistance: z.number().min(1).max(96).optional().default(24).describe("How far the rays travel."),
       rayColumns: z.number().int().min(1).max(41).optional().default(13).describe("Rays across the view; more is a finer sweep."),
@@ -684,7 +702,9 @@ export const TOOLS: ToolDef[] = [
         .array(z.string())
         .optional()
         .describe(
-          'Keep only these block ids. A trailing * is a prefix, e.g. ["minecraft:oak_log"] or ["minecraft:*_log"].',
+          'Keep only these block ids, e.g. ["minecraft:oak_log"]. * is a wildcard anywhere: ' +
+            '["minecraft:*_log"] is every wood type, ["minecraft:oak_*"] every oak block. Blocks that are ' +
+            "filtered out are still seen through, so the filter does not hide what is behind them.",
         ),
       maxResults: z.number().int().min(1).max(64).optional().default(24),
     },
@@ -848,6 +868,80 @@ export const TOOLS: ToolDef[] = [
           "The observe.seq from your last read. Omit for the current snapshot; pass it to also get every change since.",
         ),
     },
+    annotations: READ,
+  },
+
+  {
+    name: "rules_set",
+    method: "rules.set",
+    title: "Set your own reflexes (replaces the whole set)",
+    description:
+      "Write a set of standing rules — your own reflexes, in your own words — and the mod evaluates them " +
+      "every tick and fires the action the moment the condition holds. This is how a bot behaves like a " +
+      "person doing something routine: not by deciding again on every read, but by having decided once. " +
+      'Examples: {"name":"get out of water","when":{"airBelow":100},"then":{"action":"surface"}} and ' +
+      '{"name":"disengage","when":{"healthBelow":10,"hostileWithin":4},"then":{"action":"retreat","target":"nearest_hostile","distance":8}}. ' +
+      `Conditions (any subset; all that are given must hold): ${RULES_CONDITIONS}. ` +
+      '\'then\' is either {action:"<module>", ...its params} — a real module, same params as calling it — ' +
+      'or {rpc:"<method>", ...}. Optional per rule: cooldownSeconds (default 3), delayTicks (default 3, ' +
+      "because a person does not react on the very tick they notice), once (fire at most once).\n" +
+      "NOTHING IS BUILT IN and this replaces the whole set: rules you no longer want simply stop existing, " +
+      "which also means an empty array means no reflexes at all. Every firing shows up in the observation " +
+      "stream as an event with kind 'rule', so you can watch your own rules work — and see them go wrong.",
+    inputSchema: {
+      rules: z
+        .array(
+          z
+            .object({
+              name: z.string().optional().describe("A label; it is what the stream shows when it fires."),
+              when: z.object({}).passthrough().describe(`Conditions — any subset of: ${RULES_CONDITIONS}`),
+              then: z
+                .object({})
+                .passthrough()
+                .describe('{action:"surface", ...} for a module, or {rpc:"control.lookAt", ...} for any method.'),
+              cooldownSeconds: z.number().min(0).max(600).optional().describe("Ticks between firings, in seconds. Default 3."),
+              delayTicks: z.number().int().min(0).max(40).optional().describe("Notice-to-act pause. Default 3."),
+              once: z.boolean().optional().describe("Fire at most once, then stop."),
+            })
+            .passthrough(),
+        )
+        .max(16)
+        .describe("The complete set, replacing whatever was there. Empty array = no rules."),
+    },
+    annotations: WRITE,
+  },
+  {
+    name: "rules_list",
+    method: "rules.list",
+    title: "List the rules that are running",
+    description:
+      "Client-only, READ-ONLY. The rules currently in force, with their conditions, actions, cooldowns and " +
+      "how many times each has fired. Read it after rules_set to confirm what you actually installed.",
+    inputSchema: {},
+    annotations: READ,
+  },
+  {
+    name: "rules_clear",
+    method: "rules.clear",
+    title: "Remove all rules",
+    description:
+      "Client-only. Drop the whole rule set, so nothing acts between your calls again. Equivalent to " +
+      "rules_set with an empty array; use it when the situation has changed enough that your reflexes are " +
+      "now the wrong ones.",
+    inputSchema: {},
+    annotations: WRITE,
+  },
+  {
+    name: "help",
+    method: "action.help",
+    title: "What can I do, and what will it say back",
+    description:
+      "Client-only, READ-ONLY. The whole module surface in one call: every module with what it does, what " +
+      "it takes and the states it returns; the target vocabulary; the fields vision.scan reports; the " +
+      "conditions a rule can use; the plan limit; and how the watch stream works. Read this once instead " +
+      "of inferring the API from a pile of tool descriptions — it is generated next to the modules " +
+      "themselves, so it cannot drift from them.",
+    inputSchema: {},
     annotations: READ,
   },
   {
