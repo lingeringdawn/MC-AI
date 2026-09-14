@@ -1,5 +1,7 @@
 package dev.mcpfabric.client.tasks;
 
+import dev.mcpfabric.client.ThreatGuard;
+
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import dev.mcpfabric.client.BotController;
@@ -142,6 +144,10 @@ public final class TaskObserver {
 
 		// --- the task's own progress ----------------------------------------
 		if (taskProgress != null && taskProgress.size() > 0) o.add("progress", taskProgress);
+
+		// --- self-defence state: who the bot is fighting and whether it is actually aimed ----------
+		JsonObject guard = ThreatGuard.get().snapshot();
+		if (guard.has("engaged") && guard.get("engaged").getAsBoolean()) o.add("guard", guard);
 
 		// --- navigation state (shared by every walking task) ------------------
 		JsonObject nav = BotController.get().statusJson();

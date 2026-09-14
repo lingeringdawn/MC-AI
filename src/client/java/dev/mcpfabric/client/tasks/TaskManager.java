@@ -62,6 +62,14 @@ public final class TaskManager {
 			observer.sampleIdle(mc);
 			return;
 		}
+		// A dead player cannot act. Fail the task instead of letting it thrash against a corpse for
+		// the rest of its budget, which is what used to happen after the bot was killed mid-walk.
+		if (mc.player != null && mc.player.isDeadOrDying()) {
+			t.fail("dead");
+			observer.note("task failed — the player died");
+			observer.sampleIdle(mc);
+			return;
+		}
 		try {
 			t.tick(mc);
 		} catch (Exception e) {

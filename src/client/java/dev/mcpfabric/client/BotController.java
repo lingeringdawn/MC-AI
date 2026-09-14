@@ -68,7 +68,12 @@ public final class BotController {
 	 */
 	public static final int LOOK_NAV = 1;
 	public static final int LOOK_TASK = 2;
-	public static final int LOOK_USER = 3;
+	/**
+	 * Self-defence: a mob chewing on you outranks whatever job you were doing, but not an explicit
+	 * instruction from the caller — so it sits between the task and the user.
+	 */
+	public static final int LOOK_DEFEND = 3;
+	public static final int LOOK_USER = 4;
 	/** How long the current look owner keeps the view after its last refresh. */
 	private static final long LOOK_HOLD_TICKS = 3;
 
@@ -507,8 +512,16 @@ public final class BotController {
 
 		BlockPos node = path.get(pathIndex);
 
-		double dx = node.getX() + 0.5 - p.getX();
-		double dz = node.getZ() + 0.5 - p.getZ();
+		// A one-node path whose only node is where we already stand means the pathfinder decided the
+		// start was inside its own reach and had nothing to walk. Following that aims the bot at its
+		// own feet and leaves it orbiting that block until the deadline — which is what happened when
+		// collecting a drop sitting one block below. The caller's tolerance can be tighter than the
+		// pathfinder's, so head straight for the target and cover the last fraction of a block.
+		BlockPos aimNode = node;
+		if (path.size() == 1 && horizOf(p, node) < 0.7) aimNode = navTarget;
+
+		double dx = aimNode.getX() + 0.5 - p.getX();
+		double dz = aimNode.getZ() + 0.5 - p.getZ();
 		double horiz = Math.sqrt(dx * dx + dz * dz);
 		if (horiz < 0.05) {
 			// Only the final node can be underfoot now. Fall back to the nav target so the heading is

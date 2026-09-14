@@ -73,7 +73,11 @@ public class McpFabricClient implements ClientModInitializer {
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
 			TaskManager.get().setWatching(McpFabric.config().enableTaskObservation);
 			TaskManager.get().setAbortOnDanger(McpFabric.config().abortTaskOnDanger);
+			ThreatGuard.get().setEnabled(McpFabric.config().enableSelfDefense);
 			TaskManager.get().tick(client);
+			// Deliberately after the task: self-defence gets the final say on the inputs, so a task
+			// cannot keep walking the bot away from a mob that is eating it.
+			ThreatGuard.get().tick(client);
 		});
 		ClientTickEvents.END_CLIENT_TICK.register(client -> {
 			// Keep the event ring buffer's tick stamp in step with the client's own world clock.

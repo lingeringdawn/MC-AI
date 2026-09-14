@@ -46,6 +46,11 @@ public final class McpConfig {
 	 */
 	public boolean enableHumanization = true;
 	/**
+	 * Fight back (or back off when badly hurt) when a hostile mob attacks while a task is running.
+	 * Without this the bot walks straight past a zombie and is beaten to death mid-job.
+	 */
+	public boolean enableSelfDefense = true;
+	/**
 	 * Let the bot save itself from a lethal fall by emptying a water bucket underneath it (the classic
 	 * "MLG water"), then scoop the water back up. Only fires when the drop would genuinely hurt, and
 	 * only when a water bucket is in the hotbar.
